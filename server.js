@@ -20,10 +20,8 @@ const PAIRS = [
   { symbol: "ETH/USD", type: "crypto" },
 ];
 
-// Rotate timeframes — one per run to stay within 8 calls/minute limit
 const TIMEFRAMES = ["5min", "15min", "1h"];
 let tfIndex = 0;
-
 let signals = {};
 let lastUpdated = null;
 let isAnalyzing = false;
@@ -36,43 +34,105 @@ function log(msg) {
   if (logs.length > 100) logs.pop();
 }
 
-// Wait between API calls
 const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Simple technical analysis without Gemini
+function analyzeCandles(symbol, interval, candles) {
+  try {
+    const closes = candles.map(c => parseFloat(c.close));
+    const highs = candles.map(c => parseFloat(c.high));
+    const lows = candles.map(c => parseFloat(c.low));
+    const latest = closes[0];
+    const prev1 = closes[1];
+    const prev2 = closes[2];
+    const prev3 = closes[3];
+
+    // Simple Moving Averages
+    const sma3 = (closes[0]+closes[1]+closes[2])/3;
+    const sma6 = closes.slice(0,6).reduce((a,b)=>a+b,0)/6;
+
+    // Trend detection
+    const uptrend = closes[0] > closes[1] && closes[1] > closes[2] && closes[2] > closes[3];
+    const downtrend = closes[0] < closes[1] && closes[1] < closes[2] && closes[2] < closes[3];
+
+    // Momentum
+    const momentum = ((closes[0] - closes[4]) / closes[4]) * 100;
+
+    // Candle patterns
+    const body0 = Math.abs(closes[0] - parseFloat(candles[0].open));
+    const range0 = highs[0] - lows[0];
+    const upperWick = highs[0] - Math.max(closes[0], parseFloat(candles[0].open));
+    const lowerWick = Math.min(closes[0], parseFloat(candles[0].open)) - lows[0];
+
+    const isBullishCandle = closes[0] > parseFloat(candles[0].open);
+    const isBearishCandle = closes[0] < parseFloat(candles[0].open);
+    const isHammer = lowerWick > body0 * 2 && upperWick < body0 * 0.5;
+    const isShootingStar = upperWick > body0 * 2 && lowerWick < body0 * 0.5;
+    const isDoji = body0 < range0 * 0.1;
+
+    // Bullish engulfing
+    const bullEngulf = isBullishCandle && closes[1] < parseFloat(candles[1].open) &&
+      closes[0] > parseFloat(candles[1].open) && parseFloat(candles[0].open) < closes[1];
+
+    // Bearish engulfing
+    const bearEngulf = isBearishCandle && closes[1] > parseFloat(candles[1].open) &&
+      closes[0] < parseFloat(candles[1].open) && parseFloat(candles[0].open) > closes[1];
+
+    // Signal calculation
+    let signal = "WAIT";
+    let confidence = 50;
+    let pattern = "No clear pattern";
+    let trend = "Sideways";
+
+    if (uptrend && sma3 > sma6) {
+      trend = "Strong uptrend";
+      signal = "BUY";
+      confidence = 72;
+    } else if (downtrend && sma3 < sma6) {
+      trend = "Strong downtrend";
+      signal = "SELL";
+      confidence = 72;
+    }
+
+    if (bullEngulf) { pattern = "Bullish Engulfing"; signal = "BUY"; confidence = Math.max(confidence, 78); }
+    if (bearEngulf) { pattern = "Bearish Engulfing"; signal = "SELL"; confidence = Math.max(confidence, 78); }
+    if (isHammer && downtrend) { pattern = "Hammer"; signal = "BUY"; confidence = Math.max(confidence, 75); }
+    if (isShootingStar && uptrend) { pattern = "Shooting Star"; signal = "SELL"; confidence = Math.max(confidence, 75); }
+    if (isDoji) { pattern = "Doji"; signal = "WAIT"; confidence = 50; }
+
+    if (momentum > 0.5 && signal === "BUY") confidence = Math.min(confidence + 5, 90);
+    if (momentum < -0.5 && signal === "SELL") confidence = Math.min(confidence + 5, 90);
+
+    // TP/SL calculation
+    const atr = closes.slice(0,5).reduce((sum, c, i) => sum + Math.abs(c - (closes[i+1]||c)), 0) / 5;
+    const sl = signal === "BUY" ? (latest - atr * 1.5).toFixed(5) : (latest + atr * 1.5).toFixed(5);
+    const tp1 = signal === "BUY" ? (latest + atr * 1.5).toFixed(5) : (latest - atr * 1.5).toFixed(5);
+    const tp2 = signal === "BUY" ? (latest + atr * 3).toFixed(5) : (latest - atr * 3).toFixed(5);
+    const tp3 = signal === "BUY" ? (latest + atr * 4.5).toFixed(5) : (latest - atr * 4.5).toFixed(5);
+
+    return {
+      signal,
+      confidence,
+      pattern,
+      trend,
+      entry: latest.toFixed(5),
+      sl, tp1, tp2, tp3,
+      duration: interval === "5min" ? "15-30 minutes" : interval === "15min" ? "1-2 hours" : "4-8 hours",
+      reason: `${trend}. ${pattern}. Momentum: ${momentum.toFixed(2)}%`
+    };
+  } catch(e) {
+    log(`Analysis error ${symbol}: ${e.message}`);
+    return null;
+  }
+}
 
 async function fetchCandles(symbol, interval) {
   try {
     const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=10&apikey=${TWELVE_KEY}`;
     const res = await axios.get(url, { timeout: 15000 });
-    if (res.data.status === "error") {
-      log(`TD Error ${symbol} ${interval}: ${res.data.message}`);
-      return null;
-    }
+    if (res.data.status === "error") { log(`TD Error ${symbol}: ${res.data.message}`); return null; }
     return res.data.values || null;
-  } catch(e) {
-    log(`Fetch error ${symbol}: ${e.message}`);
-    return null;
-  }
-}
-
-async function analyzeWithGemini(symbol, interval, candles) {
-  try {
-    const ct = candles.slice(0,6).map((c,i) =>
-      `C${i+1}: O=${c.open} H=${c.high} L=${c.low} Close=${c.close}`
-    ).join(" | ");
-    const prompt = `Analyze ${symbol} ${interval}. Candles newest first: ${ct}. Return ONLY JSON: {"signal":"BUY or SELL or WAIT","confidence":85,"pattern":"pattern","trend":"trend","entry":"${candles[0]?.close}","sl":"sl price","tp1":"tp1","tp2":"tp2","tp3":"tp3","duration":"duration","reason":"reason"}`;
-
-    const res = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
-      { contents:[{parts:[{text:prompt}]}], generationConfig:{temperature:0.1,maxOutputTokens:300,responseMimeType:"application/json",thinkingConfig:{thinkingBudget:0}} },
-      { timeout: 30000 }
-    );
-    const raw = res.data.candidates?.[0]?.content?.parts?.map(p=>p.text||"").join("") || "";
-    const m = raw.match(/\{[\s\S]*\}/);
-    return m ? JSON.parse(m[0]) : null;
-  } catch(e) {
-    log(`Gemini error ${symbol}: ${e.message}`);
-    return null;
-  }
+  } catch(e) { log(`Fetch error ${symbol}: ${e.message}`); return null; }
 }
 
 async function sendNotification(symbol, signal, confidence) {
@@ -90,24 +150,18 @@ async function sendNotification(symbol, signal, confidence) {
 async function runAnalysis() {
   if (isAnalyzing) return;
   isAnalyzing = true;
-
-  // Use one timeframe per run — rotate through them
   const tf = TIMEFRAMES[tfIndex % TIMEFRAMES.length];
   tfIndex++;
-  log(`🔍 Analysis started — timeframe: ${tf}`);
+  log(`🔍 Analysis started — TF: ${tf}`);
 
   for (const pair of PAIRS) {
     try {
-      // Wait 8 seconds between calls to stay under rate limit
-      await wait(8000);
-
+      await wait(10000); // 10 second delay between pairs
       const candles = await fetchCandles(pair.symbol, tf);
-      if (!candles || candles.length < 3) {
-        log(`⚠ No data for ${pair.symbol} ${tf}`);
-        continue;
-      }
+      if (!candles || candles.length < 5) { log(`⚠ No data ${pair.symbol}`); continue; }
 
-      const analysis = await analyzeWithGemini(pair.symbol, tf, candles);
+      // Use built-in technical analysis (no Gemini = no rate limit)
+      const analysis = analyzeCandles(pair.symbol, tf, candles);
       if (!analysis) continue;
 
       const key = `${pair.symbol}_${tf}`;
@@ -124,32 +178,25 @@ async function runAnalysis() {
 
       log(`✅ ${pair.symbol} ${tf}: ${analysis.signal} ${analysis.confidence}%`);
 
-      if (analysis.signal !== "WAIT" && analysis.confidence >= 80 && analysis.signal !== prev) {
+      if (analysis.signal !== "WAIT" && analysis.confidence >= 75 && analysis.signal !== prev) {
         await sendNotification(pair.symbol, analysis.signal, analysis.confidence);
       }
-
-    } catch(e) {
-      log(`Error ${pair.symbol}: ${e.message}`);
-    }
+    } catch(e) { log(`Error ${pair.symbol}: ${e.message}`); }
   }
 
   lastUpdated = new Date().toISOString();
   isAnalyzing = false;
-  log(`✅ Analysis complete. Total signals: ${Object.keys(signals).length}`);
+  log(`✅ Done. Signals: ${Object.keys(signals).length}`);
 }
 
-app.get("/", (req, res) => res.json({ status:"APEX Signal Server ✅", lastUpdated, signalCount:Object.keys(signals).length, isAnalyzing, nextTF: TIMEFRAMES[tfIndex % TIMEFRAMES.length] }));
+app.get("/", (req, res) => res.json({ status:"APEX Signal Server ✅", lastUpdated, signalCount:Object.keys(signals).length, isAnalyzing }));
 app.get("/signals", (req, res) => res.json({ signals, lastUpdated, isAnalyzing }));
 app.get("/logs", (req, res) => res.json({ logs }));
-app.get("/trigger", (req, res) => { runAnalysis(); res.json({ message:"triggered", tf: TIMEFRAMES[tfIndex % TIMEFRAMES.length] }); });
+app.get("/trigger", (req, res) => { runAnalysis(); res.json({ message:"triggered", tf:TIMEFRAMES[tfIndex%TIMEFRAMES.length] }); });
 app.post("/trigger", (req, res) => { runAnalysis(); res.json({ message:"triggered" }); });
 app.get("/health", (req, res) => res.json({ ok:true }));
 
-// Run every 5 minutes — rotates through timeframes
-cron.schedule("*/5 * * * *", () => {
-  log("⏰ Scheduled run");
-  runAnalysis();
-});
+cron.schedule("*/5 * * * *", () => { log("⏰ Scheduled"); runAnalysis(); });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
