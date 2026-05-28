@@ -203,3 +203,19 @@ app.listen(PORT, () => {
   log(`🚀 APEX Server port ${PORT}`);
   setTimeout(runAnalysis, 3000);
 });
+
+// Manual analyze endpoint
+app.get("/analyze", async (req, res) => {
+  const { symbol, interval, duration } = req.query;
+  if (!symbol || !interval) return res.json({ error: "symbol and interval required" });
+  try {
+    const candles = await fetchCandles(symbol, interval);
+    if (!candles || candles.length < 5) return res.json({ error: "No market data available for this pair/timeframe" });
+    const analysis = analyzeCandles(symbol, interval, candles);
+    if (!analysis) return res.json({ error: "Analysis failed" });
+    if (duration) analysis.duration = duration;
+    res.json({ ...analysis, symbol, timeframe: interval, price: candles[0]?.close, timestamp: new Date().toISOString() });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
