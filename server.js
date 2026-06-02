@@ -5,7 +5,13 @@ const cron = require("node-cron");
 const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
-app.use(cors({ origin: "*" }));
+app.use(cors({
+  origin: "*",
+  methods: ["GET","POST","PUT","DELETE","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization","x-admin-passkey"],
+  credentials: false
+}));
+app.options("*", cors());
 app.use(express.json());
 
 // ============ CONFIG ============
@@ -502,3 +508,11 @@ app.listen(PORT, async () => {
   ipnId = await registerIPN();
   setTimeout(runAnalysis, 5000);
 });
+
+// Keep-alive ping to prevent Render sleep
+setInterval(() => {
+  const http = require("http");
+  try {
+    http.get(`http://localhost:${process.env.PORT || 3000}/health`);
+  } catch(e) {}
+}, 14 * 60 * 1000); // ping every 14 minutes
