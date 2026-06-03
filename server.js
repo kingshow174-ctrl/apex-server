@@ -6,7 +6,6 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-// Full CORS - allow all origins
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
@@ -17,16 +16,19 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
+// ============ CONFIG ============
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://xglwvuwxrlvyczhlhijp.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const ADMIN_PASSKEY = process.env.ADMIN_PASSKEY || "APEXFX_ADMIN_2026_PRINCEX";
-const PESAPAL_KEY = process.env.PESAPAL_CONSUMER_KEY || "";
-const PESAPAL_SECRET = process.env.PESAPAL_CONSUMER_SECRET || "";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://apex-trading-eta.vercel.app";
 const TWELVE_KEY = process.env.TWELVE_KEY || "62e0549bbdc04d76a224157e22da6bbd";
 const ONESIGNAL_APP_ID = "9b174534-5638-46d0-9efb-071db011b02c";
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY || "os_v2_app_tmlukncwhbdnbhx3a4o3aenqft7oc4a2664uo5nv3expvl2rh7arc4u3iwg5een2ybhtoxqvdslrb5zncgrhu4fzjrdt7lljm2ojtcq";
-const PESAPAL_BASE = "https://pay.pesapal.com/v3";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://apex-trading-eta.vercel.app";
+
+// IntaSend keys
+const INTASEND_SECRET = process.env.INTASEND_SECRET_KEY || "ISSecretKey_live_3021be51-2fc4-41ff-a65a-e9d35a383da4";
+const INTASEND_PUB = process.env.INTASEND_PUB_KEY || "ISPubKey_live_2c31e08e-6300-42fb-9283-0cc3babb155e";
+const INTASEND_BASE = "https://payment.intasend.com";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -40,144 +42,238 @@ const PLANS = {
 let logs = [];
 function log(msg) {
   const e = `${new Date().toISOString()} ${msg}`;
-  console.log(e); logs.unshift(e);
+  console.log(e);
+  logs.unshift(e);
   if (logs.length > 200) logs.pop();
 }
 
 const wait = ms => new Promise(r => setTimeout(r, ms));
 
 function requireAdmin(req, res, next) {
-  if (req.headers["x-admin-passkey"] !== ADMIN_PASSKEY) return res.status(401).json({ error:"Unauthorized" });
+  if (req.headers["x-admin-passkey"] !== ADMIN_PASSKEY) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
-// PesaPal token cache
-let ppToken = null, ppExpiry = null;
-async function getPPToken() {
-  if (ppToken && ppExpiry && Date.now() < ppExpiry) return ppToken;
-  log("Getting PesaPal token...");
-  const res = await axios.post(`${PESAPAL_BASE}/api/Auth/RequestToken`,
-    { consumer_key: PESAPAL_KEY, consumer_secret: PESAPAL_SECRET },
-    { headers:{ "Content-Type":"application/json", Accept:"application/json" }, timeout:20000 }
-  );
-  ppToken = res.data.token;
-  ppExpiry = Date.now() + 4*60*60*1000;
-  log("✅ PesaPal token obtained");
-  return ppToken;
+// ============ INTASEND HELPERS ============
+async function intasendRequest(endpoint, payload) {
+  const res = await axios.post(`${INTASEND_BASE}${endpoint}`, payload, {
+    headers: {
+      "Authorization": `Bearer ${INTASEND_SECRET}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    timeout: 30000,
+  });
+  return res.data;
 }
 
-// IPN registration
-let ipnId = null;
-async function registerIPN() {
+// ============ CHECKOUT LINK (works for M-Pesa + Card) ============
+async function createCheckoutLink(user_id, email, name, plan) {
+  const planData = PLANS[plan];
+  const orderId = `APEXFX-${Date.now()}-${user_id.slice(0,8)}`;
+
+  // IntaSend collection link
+  const payload = {
+    public_key: INTASEND_PUB,
+    currency: "KES",
+    amount: planData.price,
+    email: email,
+    first_name: (name || "User").split(" ")[0],
+    last_name: (name || "").split(" ").slice(1).join(" ") || ".",
+    comment: `APEX FX ${planData.name} Plan`,
+    redirect_url: `${FRONTEND_URL}?apex_order=${orderId}&apex_plan=${plan}`,
+    webhook_url: `https://apex-server-09p7.onrender.com/intasend/webhook`,
+    metadata: { user_id, plan, order_id: orderId },
+  };
+
+  const data = await intasendRequest("/api/v1/checkout/", payload);
+  return { checkout_url: data.url || data.checkout_url, order_id: orderId, invoice_id: data.invoice_id || data.id };
+}
+
+// ============ MPESA STK PUSH ============
+async function initiateMpesaSTK(phone, amount, user_id, plan, orderId) {
+  // Format phone: remove leading 0 or +254, ensure 254XXXXXXXXX
+  let p = phone.replace(/\D/g,"");
+  if (p.startsWith("0")) p = "254" + p.slice(1);
+  if (p.startsWith("+")) p = p.slice(1);
+  if (!p.startsWith("254")) p = "254" + p;
+
+  const payload = {
+    public_key: INTASEND_PUB,
+    currency: "KES",
+    amount: amount,
+    phone_number: p,
+    comment: `APEX FX ${PLANS[plan]?.name} Plan`,
+    api_ref: orderId,
+  };
+
+  const data = await intasendRequest("/api/v1/payment/mpesa-stk-push/", payload);
+  return data;
+}
+
+// ============ CHECK PAYMENT STATUS ============
+async function checkPaymentStatus(invoiceId) {
   try {
-    const token = await getPPToken();
-    const res = await axios.post(`${PESAPAL_BASE}/api/URLSetup/RegisterIPN`,
-      { url:`${FRONTEND_URL.replace("vercel.app","onrender.com")}/pesapal/ipn`, ipn_notification_type:"GET" },
-      { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" }, timeout:10000 }
-    );
-    ipnId = res.data.ipn_id;
-    log(`✅ IPN registered: ${ipnId}`);
-  } catch(e) { log(`IPN error: ${e.message}`); }
+    const res = await axios.get(`${INTASEND_BASE}/api/v1/payment/status/?invoice_id=${invoiceId}`, {
+      headers: { Authorization: `Bearer ${INTASEND_SECRET}` },
+      timeout: 15000,
+    });
+    return res.data;
+  } catch(e) {
+    log(`Status check error: ${e.message}`);
+    return null;
+  }
 }
 
-// ===== PAYMENT ROUTES =====
-app.post("/pesapal/initiate", async (req, res) => {
-  log(`Payment initiate request: ${JSON.stringify(req.body)}`);
+// ============ ACTIVATE SUBSCRIPTION ============
+async function activateSub(userId, plan) {
+  const p = PLANS[plan];
+  if (!p) return;
+  const now = new Date();
+  const expiry = p.days ? new Date(now.getTime() + p.days * 86400000) : null;
+  await supabase.from("subscriptions").upsert({
+    user_id: userId, plan, status: "active",
+    price_kes: p.price, purchase_date: now.toISOString(),
+    expiry_date: expiry?.toISOString() || null,
+  }, { onConflict: "user_id" });
+  log(`✅ Sub activated: ${userId} ${plan} expires:${expiry?.toISOString()||"never"}`);
+}
+
+// ============ PAYMENT ROUTES ============
+
+// Checkout link (card + M-Pesa via IntaSend hosted page)
+app.post("/intasend/checkout", async (req, res) => {
+  log(`Checkout request: ${JSON.stringify(req.body)}`);
   const { user_id, email, name, plan } = req.body;
   if (!user_id || !email || !plan || !PLANS[plan]) {
-    return res.json({ error:"Invalid request — missing fields" });
+    return res.json({ error: "Invalid request — missing fields" });
   }
   try {
-    const token = await getPPToken();
-    if (!ipnId) await registerIPN();
+    const { checkout_url, order_id, invoice_id } = await createCheckoutLink(user_id, email, name, plan);
+
+    // Save pending payment
+    await supabase.from("payments").insert({
+      user_id, plan,
+      amount: PLANS[plan].price,
+      pesapal_order_id: order_id,
+      pesapal_tracking_id: invoice_id,
+      status: "pending",
+    });
+
+    log(`💳 Checkout created: ${order_id} KES${PLANS[plan].price}`);
+    res.json({ checkout_url, order_id, invoice_id });
+  } catch(e) {
+    log(`❌ Checkout error: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
+    res.json({ error: `Payment setup failed: ${e.message}` });
+  }
+});
+
+// M-Pesa STK Push directly
+app.post("/intasend/mpesa", async (req, res) => {
+  log(`M-Pesa STK request: ${JSON.stringify(req.body)}`);
+  const { user_id, email, phone, plan } = req.body;
+  if (!user_id || !phone || !plan || !PLANS[plan]) {
+    return res.json({ error: "Missing fields: user_id, phone, plan required" });
+  }
+  try {
     const planData = PLANS[plan];
     const orderId = `APEXFX-${Date.now()}-${user_id.slice(0,8)}`;
 
+    const stkData = await initiateMpesaSTK(phone, planData.price, user_id, plan, orderId);
+    log(`📱 STK Push sent: ${orderId} invoice:${stkData.invoice?.invoice_id}`);
+
+    // Save pending payment
     await supabase.from("payments").insert({
-      user_id, plan, amount:planData.price,
-      pesapal_order_id:orderId, status:"pending"
+      user_id, plan, amount: planData.price,
+      pesapal_order_id: orderId,
+      pesapal_tracking_id: stkData.invoice?.invoice_id || "",
+      status: "pending",
     });
 
-    const orderRes = await axios.post(`${PESAPAL_BASE}/api/Transactions/SubmitOrderRequest`, {
-      id: orderId,
-      currency: "KES",
-      amount: planData.price,
-      description: `APEX FX ${planData.name} Plan`,
-      callback_url: `${FRONTEND_URL}/payment/callback`,
-      notification_id: ipnId || "",
-      billing_address: {
-        email_address: email,
-        first_name: (name||"User").split(" ")[0],
-        last_name: (name||"").split(" ")[1] || "",
-      }
-    }, { headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" }, timeout:20000 });
-
-    log(`💳 Payment created: ${orderId}`);
-    res.json({ redirect_url:orderRes.data.redirect_url, order_tracking_id:orderRes.data.order_tracking_id, order_id:orderId });
+    res.json({
+      success: true,
+      message: "M-Pesa prompt sent to your phone. Enter your PIN to complete.",
+      invoice_id: stkData.invoice?.invoice_id,
+      order_id: orderId,
+      state: stkData.invoice?.state,
+    });
   } catch(e) {
-    log(`❌ Payment error: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
-    res.json({ error:`Payment failed: ${e.message}` });
+    log(`❌ STK Push error: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
+    res.json({ error: `M-Pesa failed: ${e.message}` });
   }
 });
 
-app.get("/pesapal/ipn", async (req, res) => {
-  const { orderTrackingId, orderMerchantReference } = req.query;
-  log(`IPN: ${orderTrackingId} ${orderMerchantReference}`);
+// Poll payment status (frontend polls this after STK push)
+app.get("/intasend/status/:invoiceId", async (req, res) => {
   try {
-    const token = await getPPToken();
-    const statusRes = await axios.get(`${PESAPAL_BASE}/api/Transactions/GetTransactionStatus?orderTrackingId=${orderTrackingId}`,
-      { headers:{ Authorization:`Bearer ${token}` }, timeout:10000 }
-    );
-    if (statusRes.data.payment_status_description === "Completed") {
-      const { data:payment } = await supabase.from("payments").select("*").eq("pesapal_order_id", orderMerchantReference).single();
+    const data = await checkPaymentStatus(req.params.invoiceId);
+    if (!data) return res.json({ state: "UNKNOWN" });
+
+    const state = data.invoice?.state || data.state || "PENDING";
+    log(`Payment status: ${req.params.invoiceId} → ${state}`);
+
+    // If complete, activate subscription
+    if (state === "COMPLETE") {
+      const { data: payment } = await supabase.from("payments")
+        .select("*").eq("pesapal_tracking_id", req.params.invoiceId).single();
       if (payment && payment.status !== "completed") {
-        await supabase.from("payments").update({ status:"completed", pesapal_tracking_id:orderTrackingId }).eq("pesapal_order_id", orderMerchantReference);
+        await supabase.from("payments").update({ status: "completed" }).eq("pesapal_tracking_id", req.params.invoiceId);
         await activateSub(payment.user_id, payment.plan);
       }
     }
-  } catch(e) { log(`IPN error: ${e.message}`); }
-  res.send("OK");
+
+    res.json({ state, invoice: data.invoice });
+  } catch(e) {
+    res.json({ state: "ERROR", error: e.message });
+  }
 });
 
-app.post("/pesapal/verify", async (req, res) => {
-  const { order_tracking_id, order_id, user_id } = req.body;
+// IntaSend webhook (called by IntaSend after payment)
+app.post("/intasend/webhook", async (req, res) => {
+  log(`Webhook received: ${JSON.stringify(req.body)}`);
   try {
-    const token = await getPPToken();
-    const statusRes = await axios.get(`${PESAPAL_BASE}/api/Transactions/GetTransactionStatus?orderTrackingId=${order_tracking_id}`,
-      { headers:{ Authorization:`Bearer ${token}` }, timeout:10000 }
-    );
-    if (statusRes.data.payment_status_description === "Completed") {
-      const { data:payment } = await supabase.from("payments").select("*").eq("pesapal_order_id", order_id).single();
+    const { invoice_id, state, metadata } = req.body;
+    if (state === "COMPLETE" && metadata?.user_id && metadata?.plan) {
+      const { data: payment } = await supabase.from("payments")
+        .select("*").eq("pesapal_order_id", metadata.order_id).single();
       if (payment && payment.status !== "completed") {
-        await supabase.from("payments").update({ status:"completed", pesapal_tracking_id:order_tracking_id }).eq("pesapal_order_id", order_id);
+        await supabase.from("payments").update({ status:"completed", pesapal_tracking_id:invoice_id }).eq("pesapal_order_id", metadata.order_id);
+        await activateSub(metadata.user_id, metadata.plan);
+        log(`✅ Webhook activated: ${metadata.user_id} ${metadata.plan}`);
+      }
+    }
+  } catch(e) { log(`Webhook error: ${e.message}`); }
+  res.json({ status: "ok" });
+});
+
+// Verify after redirect callback
+app.post("/intasend/verify", async (req, res) => {
+  const { invoice_id, order_id, user_id } = req.body;
+  try {
+    const data = await checkPaymentStatus(invoice_id);
+    const state = data?.invoice?.state || data?.state || "PENDING";
+    if (state === "COMPLETE") {
+      const { data: payment } = await supabase.from("payments")
+        .select("*").eq("pesapal_order_id", order_id).single();
+      if (payment && payment.status !== "completed") {
+        await supabase.from("payments").update({ status:"completed", pesapal_tracking_id:invoice_id }).eq("pesapal_order_id", order_id);
         await activateSub(payment.user_id, payment.plan);
       }
-      return res.json({ success:true, status:"completed" });
+      return res.json({ success: true, state: "COMPLETE" });
     }
-    res.json({ success:false, status:statusRes.data.payment_status_description });
-  } catch(e) { res.json({ error:e.message }); }
+    res.json({ success: false, state });
+  } catch(e) { res.json({ error: e.message }); }
 });
 
-async function activateSub(userId, plan) {
-  const p = PLANS[plan];
-  const now = new Date();
-  const expiry = p.days ? new Date(now.getTime() + p.days*86400000) : null;
-  await supabase.from("subscriptions").upsert({
-    user_id:userId, plan, status:"active",
-    price_kes:p.price, purchase_date:now.toISOString(),
-    expiry_date:expiry?.toISOString()||null
-  }, { onConflict:"user_id" });
-  log(`✅ Sub activated: ${userId} ${plan}`);
-}
-
+// ============ SUBSCRIPTION CHECK ============
 app.get("/subscription/:userId", async (req, res) => {
   try {
-    const { data:profile } = await supabase.from("profiles").select("role").eq("id", req.params.userId).single();
+    const { data: profile } = await supabase.from("profiles").select("role").eq("id", req.params.userId).single();
     if (profile?.role === "admin") return res.json({ active:true, plan:"admin", role:"admin", expires:null });
-    const { data:sub } = await supabase.from("subscriptions").select("*").eq("user_id", req.params.userId).single();
+    const { data: sub } = await supabase.from("subscriptions").select("*").eq("user_id", req.params.userId).single();
     if (!sub) return res.json({ active:false, plan:null, role:profile?.role||"user" });
     const expired = sub.expiry_date && new Date(sub.expiry_date) < new Date();
-    if (expired && sub.status==="active") {
+    if (expired && sub.status === "active") {
       await supabase.from("subscriptions").update({ status:"expired" }).eq("user_id", req.params.userId);
       return res.json({ active:false, plan:sub.plan, status:"expired", expires:sub.expiry_date });
     }
@@ -185,20 +281,18 @@ app.get("/subscription/:userId", async (req, res) => {
   } catch(e) { res.json({ error:e.message }); }
 });
 
-// ===== ADMIN ROUTES =====
-app.post("/admin/verify", (req, res) => {
-  res.json({ valid: req.body.passkey === ADMIN_PASSKEY });
-});
+// ============ ADMIN ROUTES ============
+app.post("/admin/verify", (req, res) => res.json({ valid: req.body.passkey === ADMIN_PASSKEY }));
 
 app.get("/admin/users", requireAdmin, async (req, res) => {
-  const { data:profiles } = await supabase.from("profiles").select("*").order("created_at", { ascending:false });
-  const { data:subs } = await supabase.from("subscriptions").select("*");
+  const { data: profiles } = await supabase.from("profiles").select("*").order("created_at", { ascending:false });
+  const { data: subs } = await supabase.from("subscriptions").select("*");
   res.json({ users:(profiles||[]).map(p=>({ ...p, subscription:(subs||[]).find(s=>s.user_id===p.id)||null })) });
 });
 
 app.get("/admin/payments", requireAdmin, async (req, res) => {
   const { data } = await supabase.from("payments").select("*, profiles(email,full_name)").order("created_at", { ascending:false });
-  res.json({ payments:data||[] });
+  res.json({ payments: data||[] });
 });
 
 app.post("/admin/grant", requireAdmin, async (req, res) => {
@@ -231,7 +325,7 @@ app.get("/admin/stats", requireAdmin, async (req, res) => {
   res.json({ users, active_subs:active, total_revenue:(payments||[]).reduce((a,p)=>a+(p.amount||0),0) });
 });
 
-// ===== SIGNALS ENGINE =====
+// ============ SIGNALS ENGINE ============
 const PAIRS = [
   { symbol:"EUR/USD", type:"forex" },{ symbol:"GBP/USD", type:"forex" },
   { symbol:"XAU/USD", type:"forex" },{ symbol:"BTC/USD", type:"crypto" },
@@ -256,11 +350,11 @@ function sniperAnalysis(symbol,interval,candles){
     const sma20=calcSMA(closes,20),rsi=calcRSI(closes),macd=calcMACD(closes);
     const atr=calcATR(highs,lows,closes);
     const votes=[];
-    if(ema9&&ema21){votes.push(ema9>ema21?1:-1);}
-    if(ema50){votes.push(latest>ema50?1:-1);}
-    if(rsi!==null){votes.push(rsi<30?1:rsi>70?-1:rsi<45?0.5:-0.5);}
-    if(macd){votes.push(macd.histogram>0?1:-1);}
-    if(sma20){votes.push(latest>sma20?1:-1);}
+    if(ema9&&ema21)votes.push(ema9>ema21?1:-1);
+    if(ema50)votes.push(latest>ema50?1:-1);
+    if(rsi!==null)votes.push(rsi<30?1:rsi>70?-1:rsi<45?0.5:-0.5);
+    if(macd)votes.push(macd.histogram>0?1:-1);
+    if(sma20)votes.push(latest>sma20?1:-1);
     const mom=((closes[0]-closes[4])/closes[4])*100;
     votes.push(mom>0.1?1:mom<-0.1?-1:0);
     const bull=votes.filter(v=>v>0).length,bear=votes.filter(v=>v<0).length,total=votes.length;
@@ -288,8 +382,7 @@ async function fetchCandles(symbol,interval){
 }
 
 async function runAnalysis(){
-  if(isAnalyzing)return;
-  isAnalyzing=true;
+  if(isAnalyzing)return;isAnalyzing=true;
   const tf=TIMEFRAMES[tfIndex%TIMEFRAMES.length];tfIndex++;
   log(`🎯 Analysis TF:${tf}`);
   for(const pair of PAIRS){
@@ -319,32 +412,26 @@ app.get("/signals/analyze", async (req,res) => {
     if(!candles||candles.length<30)return res.json({error:`No data for ${symbol}`});
     const market=sniperAnalysis(symbol,interval,candles);
     if(!market)return res.json({error:"Analysis failed"});
-    const entry=parseFloat(market.entryPrice),atr=parseFloat(market.sl?Math.abs(entry-parseFloat(market.sl)):0.001);
-    const pending={...market,entryPrice:(signal==="BUY"?entry-atr*0.3:entry+atr*0.3).toFixed(5),pendingType:market.signal==="BUY"?"BUY LIMIT":"SELL LIMIT"};
-    res.json({symbol,timeframe:interval,price:candles[0]?.close,timestamp:new Date().toISOString(),market,pending});
+    res.json({symbol,timeframe:interval,price:candles[0]?.close,timestamp:new Date().toISOString(),market});
   }catch(e){res.json({error:e.message});}
 });
 
-app.get("/", (req,res) => res.json({status:"APEX FX Server ✅",lastUpdated,signals:Object.keys(signals).length,isAnalyzing,pesapal:!!ppToken}));
-app.get("/signals", (req,res) => res.json({signals,lastUpdated,isAnalyzing}));
-app.get("/logs", (req,res) => res.json({logs}));
-app.get("/health", (req,res) => res.json({ok:true,time:new Date().toISOString()}));
-app.get("/trigger", (req,res) => {runAnalysis();res.json({message:"triggered"});});
-app.post("/trigger", (req,res) => {runAnalysis();res.json({message:"triggered"});});
+app.get("/", (req,res) => res.json({status:"APEX FX Server ✅",lastUpdated,signals:Object.keys(signals).length,isAnalyzing,provider:"IntaSend"}));
+app.get("/signals",(req,res)=>res.json({signals,lastUpdated,isAnalyzing}));
+app.get("/logs",(req,res)=>res.json({logs}));
+app.get("/health",(req,res)=>res.json({ok:true,time:new Date().toISOString()}));
+app.get("/trigger",(req,res)=>{runAnalysis();res.json({message:"triggered"});});
+app.post("/trigger",(req,res)=>{runAnalysis();res.json({message:"triggered"});});
 
-cron.schedule("*/5 * * * *", () => {log("⏰ Scheduled");runAnalysis();});
+cron.schedule("*/5 * * * *",()=>{log("⏰ Scheduled");runAnalysis();});
 
-// Keep-alive ping every 14 minutes to prevent Render sleep
-setInterval(async () => {
-  try {
-    await axios.get(`http://localhost:${process.env.PORT||3000}/health`, {timeout:5000});
-    log("🏓 Keep-alive ping");
-  } catch(e) {}
-}, 14*60*1000);
+// Keep-alive every 14 min
+setInterval(async()=>{
+  try{await axios.get(`http://localhost:${process.env.PORT||3000}/health`,{timeout:5000});log("🏓 Keep-alive");}catch(e){}
+},14*60*1000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  log(`🚀 APEX FX Server port ${PORT}`);
-  try { await registerIPN(); } catch(e) { log(`Startup IPN error: ${e.message}`); }
+  log(`🚀 APEX FX Server port ${PORT} — IntaSend payment provider`);
   setTimeout(runAnalysis, 5000);
 });
