@@ -21,21 +21,24 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "https://xglwvuwxrlvyczhlhijp.s
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const ADMIN_PASSKEY = process.env.ADMIN_PASSKEY || "APEXFX_ADMIN_2026_PRINCEX";
 const TWELVE_KEY = process.env.TWELVE_KEY || "62e0549bbdc04d76a224157e22da6bbd";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://apex-trading-eta.vercel.app";
 const ONESIGNAL_APP_ID = "9b174534-5638-46d0-9efb-071db011b02c";
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY || "os_v2_app_tmlukncwhbdnbhx3a4o3aenqft7oc4a2664uo5nv3expvl2rh7arc4u3iwg5een2ybhtoxqvdslrb5zncgrhu4fzjrdt7lljm2ojtcq";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://apex-trading-eta.vercel.app";
 
-// IntaSend keys
-const INTASEND_SECRET = process.env.INTASEND_SECRET_KEY || "ISSecretKey_live_3021be51-2fc4-41ff-a65a-e9d35a383da4";
-const INTASEND_PUB = process.env.INTASEND_PUB_KEY || "ISPubKey_live_2c31e08e-6300-42fb-9283-0cc3babb155e";
-const INTASEND_BASE = "https://payment.intasend.com";
+// Daraja credentials
+const DARAJA_CONSUMER_KEY    = process.env.DARAJA_CONSUMER_KEY    || "6D8ASAUllnUXgEcFKxtKRtL8TaHgZLtZq0k5Aih013uecVW0";
+const DARAJA_CONSUMER_SECRET = process.env.DARAJA_CONSUMER_SECRET || "JYCGuVblUvlLXaF0U55Lg0A9yYAhNBbpGlG051Y2xaR4ejL4QveBteXGO79wVlnM";
+const DARAJA_TILL            = process.env.DARAJA_TILL            || "9352134";
+const DARAJA_PASSKEY         = process.env.DARAJA_PASSKEY         || "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919";
+const DARAJA_BASE            = "https://api.safaricom.co.ke";
+const DARAJA_CALLBACK_URL    = "https://apex-server-09p7.onrender.com/mpesa/callback";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 const PLANS = {
-  weekly:   { name:"Weekly",   price:299,   days:7 },
-  monthly:  { name:"Monthly",  price:799,   days:30 },
-  annual:   { name:"Annual",   price:6999,  days:365 },
+  weekly:   { name:"Weekly",   price:299,   days:7    },
+  monthly:  { name:"Monthly",  price:799,   days:30   },
+  annual:   { name:"Annual",   price:6999,  days:365  },
   lifetime: { name:"Lifetime", price:14999, days:null },
 };
 
@@ -46,83 +49,85 @@ function log(msg) {
   logs.unshift(e);
   if (logs.length > 200) logs.pop();
 }
-
 const wait = ms => new Promise(r => setTimeout(r, ms));
 
 function requireAdmin(req, res, next) {
-  if (req.headers["x-admin-passkey"] !== ADMIN_PASSKEY) return res.status(401).json({ error: "Unauthorized" });
+  if (req.headers["x-admin-passkey"] !== ADMIN_PASSKEY) return res.status(401).json({ error:"Unauthorized" });
   next();
 }
 
-// ============ INTASEND HELPERS ============
-async function intasendRequest(endpoint, payload) {
-  const res = await axios.post(`${INTASEND_BASE}${endpoint}`, payload, {
-    headers: {
-      "Authorization": `Bearer ${INTASEND_SECRET}`,
-      "Content-Type": "application/json",
-      "Accept": "application/json",
-    },
-    timeout: 30000,
+// ============ DARAJA TOKEN ============
+let darajaToken = null;
+let darajaExpiry = null;
+
+async function getDarajaToken() {
+  if (darajaToken && darajaExpiry && Date.now() < darajaExpiry) return darajaToken;
+  const creds = Buffer.from(`${DARAJA_CONSUMER_KEY}:${DARAJA_CONSUMER_SECRET}`).toString("base64");
+  const res = await axios.get(`${DARAJA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
+    headers: { Authorization: `Basic ${creds}` },
+    timeout: 15000,
   });
-  return res.data;
+  darajaToken = res.data.access_token;
+  darajaExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
+  log("✅ Daraja token obtained");
+  return darajaToken;
 }
 
-// ============ CHECKOUT LINK (works for M-Pesa + Card) ============
-async function createCheckoutLink(user_id, email, name, plan) {
-  const planData = PLANS[plan];
-  const orderId = `APEXFX-${Date.now()}-${user_id.slice(0,8)}`;
+// ============ STK PUSH ============
+async function stkPush(phone, amount, orderId, planName) {
+  const token = await getDarajaToken();
+  const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14);
+  const password = Buffer.from(`${DARAJA_TILL}${DARAJA_PASSKEY}${timestamp}`).toString("base64");
 
-  // IntaSend collection link
-  const payload = {
-    public_key: INTASEND_PUB,
-    currency: "KES",
-    amount: planData.price,
-    email: email,
-    first_name: (name || "User").split(" ")[0],
-    last_name: (name || "").split(" ").slice(1).join(" ") || ".",
-    comment: `APEX FX ${planData.name} Plan`,
-    redirect_url: `${FRONTEND_URL}?apex_order=${orderId}&apex_plan=${plan}`,
-    webhook_url: `https://apex-server-09p7.onrender.com/intasend/webhook`,
-    metadata: { user_id, plan, order_id: orderId },
-  };
-
-  const data = await intasendRequest("/api/v1/checkout/", payload);
-  return { checkout_url: data.url || data.checkout_url, order_id: orderId, invoice_id: data.invoice_id || data.id };
-}
-
-// ============ MPESA STK PUSH ============
-async function initiateMpesaSTK(phone, amount, user_id, plan, orderId) {
-  // Format phone: remove leading 0 or +254, ensure 254XXXXXXXXX
-  let p = phone.replace(/\D/g,"");
+  // Format phone: must be 254XXXXXXXXX
+  let p = phone.replace(/\D/g, "");
   if (p.startsWith("0")) p = "254" + p.slice(1);
   if (p.startsWith("+")) p = p.slice(1);
   if (!p.startsWith("254")) p = "254" + p;
+  if (p.length !== 12) throw new Error(`Invalid phone number: ${phone}`);
 
   const payload = {
-    public_key: INTASEND_PUB,
-    currency: "KES",
-    amount: amount,
-    phone_number: p,
-    comment: `APEX FX ${PLANS[plan]?.name} Plan`,
-    api_ref: orderId,
+    BusinessShortCode: DARAJA_TILL,
+    Password: password,
+    Timestamp: timestamp,
+    TransactionType: "CustomerBuyGoodsOnline",
+    Amount: Math.ceil(amount),
+    PartyA: p,
+    PartyB: DARAJA_TILL,
+    PhoneNumber: p,
+    CallBackURL: DARAJA_CALLBACK_URL,
+    AccountReference: orderId,
+    TransactionDesc: `APEX FX ${planName} Plan`,
   };
 
-  const data = await intasendRequest("/api/v1/payment/mpesa-stk-push/", payload);
-  return data;
+  const res = await axios.post(`${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`, payload, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    timeout: 30000,
+  });
+
+  log(`📱 STK Push sent: ${orderId} phone:${p} amount:${amount}`);
+  return res.data;
 }
 
-// ============ CHECK PAYMENT STATUS ============
-async function checkPaymentStatus(invoiceId) {
-  try {
-    const res = await axios.get(`${INTASEND_BASE}/api/v1/payment/status/?invoice_id=${invoiceId}`, {
-      headers: { Authorization: `Bearer ${INTASEND_SECRET}` },
-      timeout: 15000,
-    });
-    return res.data;
-  } catch(e) {
-    log(`Status check error: ${e.message}`);
-    return null;
-  }
+// ============ STK QUERY ============
+async function stkQuery(checkoutRequestId) {
+  const token = await getDarajaToken();
+  const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14);
+  const password = Buffer.from(`${DARAJA_TILL}${DARAJA_PASSKEY}${timestamp}`).toString("base64");
+
+  const res = await axios.post(`${DARAJA_BASE}/mpesa/stkpushquery/v1/query`, {
+    BusinessShortCode: DARAJA_TILL,
+    Password: password,
+    Timestamp: timestamp,
+    CheckoutRequestID: checkoutRequestId,
+  }, {
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    timeout: 15000,
+  });
+  return res.data;
 }
 
 // ============ ACTIVATE SUBSCRIPTION ============
@@ -136,133 +141,125 @@ async function activateSub(userId, plan) {
     price_kes: p.price, purchase_date: now.toISOString(),
     expiry_date: expiry?.toISOString() || null,
   }, { onConflict: "user_id" });
-  log(`✅ Sub activated: ${userId} ${plan} expires:${expiry?.toISOString()||"never"}`);
+  log(`✅ Subscription activated: ${userId} ${plan}`);
 }
 
-// ============ PAYMENT ROUTES ============
+// ============ MPESA ROUTES ============
 
-// Checkout link (card + M-Pesa via IntaSend hosted page)
-app.post("/intasend/checkout", async (req, res) => {
-  log(`Checkout request: ${JSON.stringify(req.body)}`);
-  const { user_id, email, name, plan } = req.body;
-  if (!user_id || !email || !plan || !PLANS[plan]) {
-    return res.json({ error: "Invalid request — missing fields" });
+// Initiate STK Push
+app.post("/mpesa/stk", async (req, res) => {
+  const { user_id, phone, plan } = req.body;
+  log(`STK request: ${JSON.stringify({ user_id, phone, plan })}`);
+
+  if (!user_id || !phone || !plan || !PLANS[plan]) {
+    return res.json({ error: "Missing fields: user_id, phone, plan required" });
   }
+
   try {
-    const { checkout_url, order_id, invoice_id } = await createCheckoutLink(user_id, email, name, plan);
+    const planData = PLANS[plan];
+    const orderId = `APEXFX-${Date.now()}-${user_id.slice(0, 8)}`;
+    const stkData = await stkPush(phone, planData.price, orderId, planData.name);
+
+    if (stkData.ResponseCode !== "0") {
+      return res.json({ error: stkData.ResponseDescription || "STK Push failed" });
+    }
 
     // Save pending payment
     await supabase.from("payments").insert({
       user_id, plan,
-      amount: PLANS[plan].price,
-      pesapal_order_id: order_id,
-      pesapal_tracking_id: invoice_id,
-      status: "pending",
-    });
-
-    log(`💳 Checkout created: ${order_id} KES${PLANS[plan].price}`);
-    res.json({ checkout_url, order_id, invoice_id });
-  } catch(e) {
-    log(`❌ Checkout error: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
-    res.json({ error: `Payment setup failed: ${e.message}` });
-  }
-});
-
-// M-Pesa STK Push directly
-app.post("/intasend/mpesa", async (req, res) => {
-  log(`M-Pesa STK request: ${JSON.stringify(req.body)}`);
-  const { user_id, email, phone, plan } = req.body;
-  if (!user_id || !phone || !plan || !PLANS[plan]) {
-    return res.json({ error: "Missing fields: user_id, phone, plan required" });
-  }
-  try {
-    const planData = PLANS[plan];
-    const orderId = `APEXFX-${Date.now()}-${user_id.slice(0,8)}`;
-
-    const stkData = await initiateMpesaSTK(phone, planData.price, user_id, plan, orderId);
-    log(`📱 STK Push sent: ${orderId} invoice:${stkData.invoice?.invoice_id}`);
-
-    // Save pending payment
-    await supabase.from("payments").insert({
-      user_id, plan, amount: planData.price,
+      amount: planData.price,
       pesapal_order_id: orderId,
-      pesapal_tracking_id: stkData.invoice?.invoice_id || "",
+      pesapal_tracking_id: stkData.CheckoutRequestID,
       status: "pending",
     });
 
     res.json({
       success: true,
-      message: "M-Pesa prompt sent to your phone. Enter your PIN to complete.",
-      invoice_id: stkData.invoice?.invoice_id,
+      message: "M-Pesa prompt sent! Enter your PIN on your phone.",
+      checkout_request_id: stkData.CheckoutRequestID,
+      merchant_request_id: stkData.MerchantRequestID,
       order_id: orderId,
-      state: stkData.invoice?.state,
     });
   } catch(e) {
-    log(`❌ STK Push error: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
-    res.json({ error: `M-Pesa failed: ${e.message}` });
+    log(`❌ STK error: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
+    res.json({ error: `M-Pesa failed: ${e.response?.data?.errorMessage || e.message}` });
   }
 });
 
-// Poll payment status (frontend polls this after STK push)
-app.get("/intasend/status/:invoiceId", async (req, res) => {
+// Poll STK status
+app.get("/mpesa/status/:checkoutRequestId", async (req, res) => {
   try {
-    const data = await checkPaymentStatus(req.params.invoiceId);
-    if (!data) return res.json({ state: "UNKNOWN" });
+    const data = await stkQuery(req.params.checkoutRequestId);
+    log(`STK Query: ${req.params.checkoutRequestId} → ${data.ResultCode}`);
 
-    const state = data.invoice?.state || data.state || "PENDING";
-    log(`Payment status: ${req.params.invoiceId} → ${state}`);
-
-    // If complete, activate subscription
-    if (state === "COMPLETE") {
+    // 0 = success, 1032 = cancelled, 1 = failed
+    if (data.ResultCode === "0" || data.ResultCode === 0) {
+      // Payment successful — activate subscription
       const { data: payment } = await supabase.from("payments")
-        .select("*").eq("pesapal_tracking_id", req.params.invoiceId).single();
+        .select("*")
+        .eq("pesapal_tracking_id", req.params.checkoutRequestId)
+        .single();
+
       if (payment && payment.status !== "completed") {
-        await supabase.from("payments").update({ status: "completed" }).eq("pesapal_tracking_id", req.params.invoiceId);
+        await supabase.from("payments").update({ status: "completed" })
+          .eq("pesapal_tracking_id", req.params.checkoutRequestId);
         await activateSub(payment.user_id, payment.plan);
+      }
+      return res.json({ state: "COMPLETE", message: "Payment successful" });
+    }
+
+    if (data.ResultCode === "1032") return res.json({ state: "CANCELLED", message: "Payment cancelled by user" });
+    if (data.ResultCode !== undefined && data.ResultCode !== null && data.ResultCode !== "") {
+      if (data.ResultCode !== "0") {
+        // Still pending or other state
+        if (data.ResultDesc?.includes("pending") || data.ResultDesc?.includes("in process")) {
+          return res.json({ state: "PENDING", message: data.ResultDesc });
+        }
+        return res.json({ state: "FAILED", message: data.ResultDesc || "Payment failed" });
       }
     }
 
-    res.json({ state, invoice: data.invoice });
+    res.json({ state: "PENDING", message: data.ResultDesc || "Waiting for payment..." });
   } catch(e) {
-    res.json({ state: "ERROR", error: e.message });
+    // If query fails it usually means still processing
+    if (e.response?.data?.errorCode === "500.001.1001") {
+      return res.json({ state: "PENDING", message: "Still processing..." });
+    }
+    res.json({ state: "PENDING", message: "Checking..." });
   }
 });
 
-// IntaSend webhook (called by IntaSend after payment)
-app.post("/intasend/webhook", async (req, res) => {
-  log(`Webhook received: ${JSON.stringify(req.body)}`);
+// Daraja callback (Safaricom calls this after payment)
+app.post("/mpesa/callback", async (req, res) => {
+  log(`📲 Daraja callback: ${JSON.stringify(req.body)}`);
   try {
-    const { invoice_id, state, metadata } = req.body;
-    if (state === "COMPLETE" && metadata?.user_id && metadata?.plan) {
-      const { data: payment } = await supabase.from("payments")
-        .select("*").eq("pesapal_order_id", metadata.order_id).single();
-      if (payment && payment.status !== "completed") {
-        await supabase.from("payments").update({ status:"completed", pesapal_tracking_id:invoice_id }).eq("pesapal_order_id", metadata.order_id);
-        await activateSub(metadata.user_id, metadata.plan);
-        log(`✅ Webhook activated: ${metadata.user_id} ${metadata.plan}`);
-      }
-    }
-  } catch(e) { log(`Webhook error: ${e.message}`); }
-  res.json({ status: "ok" });
-});
+    const callback = req.body?.Body?.stkCallback;
+    if (!callback) return res.json({ ResultCode: 0, ResultDesc: "OK" });
 
-// Verify after redirect callback
-app.post("/intasend/verify", async (req, res) => {
-  const { invoice_id, order_id, user_id } = req.body;
-  try {
-    const data = await checkPaymentStatus(invoice_id);
-    const state = data?.invoice?.state || data?.state || "PENDING";
-    if (state === "COMPLETE") {
+    const { ResultCode, CheckoutRequestID } = callback;
+
+    if (ResultCode === 0) {
+      // Payment successful
       const { data: payment } = await supabase.from("payments")
-        .select("*").eq("pesapal_order_id", order_id).single();
+        .select("*")
+        .eq("pesapal_tracking_id", CheckoutRequestID)
+        .single();
+
       if (payment && payment.status !== "completed") {
-        await supabase.from("payments").update({ status:"completed", pesapal_tracking_id:invoice_id }).eq("pesapal_order_id", order_id);
+        await supabase.from("payments").update({ status: "completed" })
+          .eq("pesapal_tracking_id", CheckoutRequestID);
         await activateSub(payment.user_id, payment.plan);
+        log(`✅ Callback activated: ${payment.user_id} ${payment.plan}`);
       }
-      return res.json({ success: true, state: "COMPLETE" });
+    } else {
+      await supabase.from("payments").update({ status: "failed" })
+        .eq("pesapal_tracking_id", CheckoutRequestID);
+      log(`❌ Payment failed: ${callback.ResultDesc}`);
     }
-    res.json({ success: false, state });
-  } catch(e) { res.json({ error: e.message }); }
+  } catch(e) {
+    log(`Callback error: ${e.message}`);
+  }
+  res.json({ ResultCode: 0, ResultDesc: "OK" });
 });
 
 // ============ SUBSCRIPTION CHECK ============
@@ -292,7 +289,7 @@ app.get("/admin/users", requireAdmin, async (req, res) => {
 
 app.get("/admin/payments", requireAdmin, async (req, res) => {
   const { data } = await supabase.from("payments").select("*, profiles(email,full_name)").order("created_at", { ascending:false });
-  res.json({ payments: data||[] });
+  res.json({ payments:data||[] });
 });
 
 app.post("/admin/grant", requireAdmin, async (req, res) => {
@@ -378,7 +375,7 @@ async function fetchCandles(symbol,interval){
     const res=await axios.get(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=60&apikey=${TWELVE_KEY}`,{timeout:15000});
     if(res.data.status==="error"){log(`TD Error ${symbol}: ${res.data.message}`);return null;}
     return res.data.values||null;
-  }catch(e){log(`Fetch error ${symbol}: ${e.message}`);return null;}
+  }catch(e){log(`Fetch error: ${e.message}`);return null;}
 }
 
 async function runAnalysis(){
@@ -406,7 +403,7 @@ async function runAnalysis(){
 
 app.get("/signals/analyze", async (req,res) => {
   const {symbol,interval}=req.query;
-  if(!symbol||!interval)return res.json({error:"symbol and interval required"});
+  if(!symbol||!interval)return res.json({error:"required: symbol, interval"});
   try{
     const candles=await fetchCandles(symbol,interval);
     if(!candles||candles.length<30)return res.json({error:`No data for ${symbol}`});
@@ -416,7 +413,7 @@ app.get("/signals/analyze", async (req,res) => {
   }catch(e){res.json({error:e.message});}
 });
 
-app.get("/", (req,res) => res.json({status:"APEX FX Server ✅",lastUpdated,signals:Object.keys(signals).length,isAnalyzing,provider:"IntaSend"}));
+app.get("/", (req,res)=>res.json({status:"APEX FX Server ✅",lastUpdated,signals:Object.keys(signals).length,isAnalyzing,provider:"Safaricom Daraja"}));
 app.get("/signals",(req,res)=>res.json({signals,lastUpdated,isAnalyzing}));
 app.get("/logs",(req,res)=>res.json({logs}));
 app.get("/health",(req,res)=>res.json({ok:true,time:new Date().toISOString()}));
@@ -425,13 +422,13 @@ app.post("/trigger",(req,res)=>{runAnalysis();res.json({message:"triggered"});})
 
 cron.schedule("*/5 * * * *",()=>{log("⏰ Scheduled");runAnalysis();});
 
-// Keep-alive every 14 min
 setInterval(async()=>{
   try{await axios.get(`http://localhost:${process.env.PORT||3000}/health`,{timeout:5000});log("🏓 Keep-alive");}catch(e){}
 },14*60*1000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  log(`🚀 APEX FX Server port ${PORT} — IntaSend payment provider`);
+  log(`🚀 APEX FX Server port ${PORT} — Safaricom Daraja M-Pesa`);
+  try { await getDarajaToken(); } catch(e) { log(`Token error: ${e.message}`); }
   setTimeout(runAnalysis, 5000);
 });
