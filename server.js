@@ -25,13 +25,21 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "https://apex-trading-eta.verce
 const ONESIGNAL_APP_ID = "9b174534-5638-46d0-9efb-071db011b02c";
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY || "os_v2_app_tmlukncwhbdnbhx3a4o3aenqft7oc4a2664uo5nv3expvl2rh7arc4u3iwg5een2ybhtoxqvdslrb5zncgrhu4fzjrdt7lljm2ojtcq";
 
-// Daraja credentials
+// ============ DARAJA CONFIG ============
+const IS_SANDBOX = process.env.DARAJA_SANDBOX !== "false"; // default sandbox
+const DARAJA_BASE = IS_SANDBOX
+  ? "https://sandbox.safaricom.co.ke"
+  : "https://api.safaricom.co.ke";
+
 const DARAJA_CONSUMER_KEY    = process.env.DARAJA_CONSUMER_KEY    || "6D8ASAUllnUXgEcFKxtKRtL8TaHgZLtZq0k5Aih013uecVW0";
 const DARAJA_CONSUMER_SECRET = process.env.DARAJA_CONSUMER_SECRET || "JYCGuVblUvlLXaF0U55Lg0A9yYAhNBbpGlG051Y2xaR4ejL4QveBteXGO79wVlnM";
-const DARAJA_TILL            = process.env.DARAJA_TILL            || "9352134";
 const DARAJA_PASSKEY         = process.env.DARAJA_PASSKEY         || "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919";
-const DARAJA_BASE            = "https://api.safaricom.co.ke";
 const DARAJA_CALLBACK_URL    = "https://apex-server-09p7.onrender.com/mpesa/callback";
+
+// Till: sandbox uses 174379, production uses your real till
+const DARAJA_TILL = IS_SANDBOX
+  ? (process.env.DARAJA_SANDBOX_TILL || "174379")
+  : (process.env.DARAJA_TILL || "9352134");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -62,71 +70,101 @@ let darajaExpiry = null;
 
 async function getDarajaToken() {
   if (darajaToken && darajaExpiry && Date.now() < darajaExpiry) return darajaToken;
+
   const creds = Buffer.from(`${DARAJA_CONSUMER_KEY}:${DARAJA_CONSUMER_SECRET}`).toString("base64");
-  const res = await axios.get(`${DARAJA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
-    headers: { Authorization: `Basic ${creds}` },
-    timeout: 15000,
-  });
-  darajaToken = res.data.access_token;
-  darajaExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
-  log("✅ Daraja token obtained");
+  log(`Getting Daraja token from ${DARAJA_BASE}...`);
+
+  const res = await axios.get(
+    `${DARAJA_BASE}/oauth/v1/generate?grant_type=client_credentials`,
+    {
+      headers: {
+        Authorization: `Basic ${creds}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 15000,
+    }
+  );
+
+  if (!res.data.access_token) throw new Error("No access_token in response: " + JSON.stringify(res.data));
+
+  darajaToken  = res.data.access_token;
+  darajaExpiry = Date.now() + ((parseInt(res.data.expires_in) || 3600) - 120) * 1000;
+  log(`✅ Daraja token OK (${IS_SANDBOX?"SANDBOX":"PRODUCTION"})`);
   return darajaToken;
+}
+
+// ============ FORMAT PHONE ============
+function formatPhone(phone) {
+  let p = phone.replace(/\D/g, "");
+  if (p.startsWith("0"))   p = "254" + p.slice(1);
+  if (p.startsWith("+"))   p = p.slice(1);
+  if (!p.startsWith("254")) p = "254" + p;
+  if (p.length !== 12) throw new Error(`Invalid phone number: ${phone} → ${p}`);
+  return p;
 }
 
 // ============ STK PUSH ============
 async function stkPush(phone, amount, orderId, planName) {
   const token = await getDarajaToken();
-  const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14);
-  const password = Buffer.from(`${DARAJA_TILL}${DARAJA_PASSKEY}${timestamp}`).toString("base64");
-
-  // Format phone: must be 254XXXXXXXXX
-  let p = phone.replace(/\D/g, "");
-  if (p.startsWith("0")) p = "254" + p.slice(1);
-  if (p.startsWith("+")) p = p.slice(1);
-  if (!p.startsWith("254")) p = "254" + p;
-  if (p.length !== 12) throw new Error(`Invalid phone number: ${phone}`);
+  const ts    = new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14);
+  const pwd   = Buffer.from(`${DARAJA_TILL}${DARAJA_PASSKEY}${ts}`).toString("base64");
+  const p     = formatPhone(phone);
 
   const payload = {
     BusinessShortCode: DARAJA_TILL,
-    Password: password,
-    Timestamp: timestamp,
-    TransactionType: "CustomerBuyGoodsOnline",
-    Amount: Math.ceil(amount),
-    PartyA: p,
-    PartyB: DARAJA_TILL,
-    PhoneNumber: p,
-    CallBackURL: DARAJA_CALLBACK_URL,
-    AccountReference: orderId,
-    TransactionDesc: `APEX FX ${planName} Plan`,
+    Password:          pwd,
+    Timestamp:         ts,
+    TransactionType:   "CustomerBuyGoodsOnline",
+    Amount:            Math.ceil(amount),
+    PartyA:            p,
+    PartyB:            DARAJA_TILL,
+    PhoneNumber:       p,
+    CallBackURL:       DARAJA_CALLBACK_URL,
+    AccountReference:  orderId.slice(0, 12),
+    TransactionDesc:   `APEX FX ${planName}`,
   };
 
-  const res = await axios.post(`${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`, payload, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    timeout: 30000,
-  });
+  log(`STK payload: ${JSON.stringify({ ...payload, Password:"***" })}`);
 
-  log(`📱 STK Push sent: ${orderId} phone:${p} amount:${amount}`);
+  const res = await axios.post(
+    `${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`,
+    payload,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 30000,
+    }
+  );
+
+  log(`STK response: ${JSON.stringify(res.data)}`);
   return res.data;
 }
 
 // ============ STK QUERY ============
 async function stkQuery(checkoutRequestId) {
   const token = await getDarajaToken();
-  const timestamp = new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14);
-  const password = Buffer.from(`${DARAJA_TILL}${DARAJA_PASSKEY}${timestamp}`).toString("base64");
+  const ts    = new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14);
+  const pwd   = Buffer.from(`${DARAJA_TILL}${DARAJA_PASSKEY}${ts}`).toString("base64");
 
-  const res = await axios.post(`${DARAJA_BASE}/mpesa/stkpushquery/v1/query`, {
-    BusinessShortCode: DARAJA_TILL,
-    Password: password,
-    Timestamp: timestamp,
-    CheckoutRequestID: checkoutRequestId,
-  }, {
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    timeout: 15000,
-  });
+  const res = await axios.post(
+    `${DARAJA_BASE}/mpesa/stkpushquery/v1/query`,
+    {
+      BusinessShortCode: DARAJA_TILL,
+      Password:          pwd,
+      Timestamp:         ts,
+      CheckoutRequestID: checkoutRequestId,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 15000,
+    }
+  );
+  log(`Query response: ${JSON.stringify(res.data)}`);
   return res.data;
 }
 
@@ -134,37 +172,38 @@ async function stkQuery(checkoutRequestId) {
 async function activateSub(userId, plan) {
   const p = PLANS[plan];
   if (!p) return;
-  const now = new Date();
+  const now    = new Date();
   const expiry = p.days ? new Date(now.getTime() + p.days * 86400000) : null;
   await supabase.from("subscriptions").upsert({
     user_id: userId, plan, status: "active",
     price_kes: p.price, purchase_date: now.toISOString(),
     expiry_date: expiry?.toISOString() || null,
   }, { onConflict: "user_id" });
-  log(`✅ Subscription activated: ${userId} ${plan}`);
+  log(`✅ Sub activated: ${userId} ${plan}`);
 }
 
 // ============ MPESA ROUTES ============
-
-// Initiate STK Push
 app.post("/mpesa/stk", async (req, res) => {
   const { user_id, phone, plan } = req.body;
-  log(`STK request: ${JSON.stringify({ user_id, phone, plan })}`);
+  log(`STK request → user:${user_id} phone:${phone} plan:${plan} mode:${IS_SANDBOX?"SANDBOX":"PROD"}`);
 
   if (!user_id || !phone || !plan || !PLANS[plan]) {
-    return res.json({ error: "Missing fields: user_id, phone, plan required" });
+    return res.json({ error:"Missing fields: user_id, phone, plan required" });
   }
 
   try {
     const planData = PLANS[plan];
-    const orderId = `APEXFX-${Date.now()}-${user_id.slice(0, 8)}`;
-    const stkData = await stkPush(phone, planData.price, orderId, planData.name);
+    const orderId  = `APX${Date.now()}`;
+
+    // In sandbox use small amount for testing
+    const amount = IS_SANDBOX ? 1 : planData.price;
+
+    const stkData = await stkPush(phone, amount, orderId, planData.name);
 
     if (stkData.ResponseCode !== "0") {
-      return res.json({ error: stkData.ResponseDescription || "STK Push failed" });
+      return res.json({ error: stkData.ResponseDescription || stkData.errorMessage || "STK Push failed" });
     }
 
-    // Save pending payment
     await supabase.from("payments").insert({
       user_id, plan,
       amount: planData.price,
@@ -175,91 +214,77 @@ app.post("/mpesa/stk", async (req, res) => {
 
     res.json({
       success: true,
-      message: "M-Pesa prompt sent! Enter your PIN on your phone.",
+      message: IS_SANDBOX
+        ? "SANDBOX: M-Pesa test prompt sent (use PIN 1234)"
+        : "M-Pesa prompt sent! Enter your PIN.",
       checkout_request_id: stkData.CheckoutRequestID,
       merchant_request_id: stkData.MerchantRequestID,
       order_id: orderId,
+      sandbox: IS_SANDBOX,
     });
   } catch(e) {
-    log(`❌ STK error: ${e.response?.data ? JSON.stringify(e.response.data) : e.message}`);
-    res.json({ error: `M-Pesa failed: ${e.response?.data?.errorMessage || e.message}` });
+    const errMsg = e.response?.data
+      ? JSON.stringify(e.response.data)
+      : e.message;
+    log(`❌ STK error: ${errMsg}`);
+    res.json({ error:`M-Pesa error: ${e.response?.data?.errorMessage || e.response?.data?.ResultDesc || e.message}` });
   }
 });
 
-// Poll STK status
 app.get("/mpesa/status/:checkoutRequestId", async (req, res) => {
   try {
     const data = await stkQuery(req.params.checkoutRequestId);
-    log(`STK Query: ${req.params.checkoutRequestId} → ${data.ResultCode}`);
+    const rc   = String(data.ResultCode ?? "");
 
-    // 0 = success, 1032 = cancelled, 1 = failed
-    if (data.ResultCode === "0" || data.ResultCode === 0) {
-      // Payment successful — activate subscription
+    if (rc === "0") {
       const { data: payment } = await supabase.from("payments")
-        .select("*")
-        .eq("pesapal_tracking_id", req.params.checkoutRequestId)
-        .single();
-
+        .select("*").eq("pesapal_tracking_id", req.params.checkoutRequestId).single();
       if (payment && payment.status !== "completed") {
-        await supabase.from("payments").update({ status: "completed" })
+        await supabase.from("payments").update({ status:"completed" })
           .eq("pesapal_tracking_id", req.params.checkoutRequestId);
         await activateSub(payment.user_id, payment.plan);
       }
-      return res.json({ state: "COMPLETE", message: "Payment successful" });
+      return res.json({ state:"COMPLETE", message:"Payment successful!" });
     }
+    if (rc === "1032") return res.json({ state:"CANCELLED", message:"Cancelled by user" });
+    if (rc === "1037") return res.json({ state:"TIMEOUT",   message:"Request timed out" });
+    if (rc !== "")     return res.json({ state:"FAILED",    message:data.ResultDesc || "Payment failed" });
 
-    if (data.ResultCode === "1032") return res.json({ state: "CANCELLED", message: "Payment cancelled by user" });
-    if (data.ResultCode !== undefined && data.ResultCode !== null && data.ResultCode !== "") {
-      if (data.ResultCode !== "0") {
-        // Still pending or other state
-        if (data.ResultDesc?.includes("pending") || data.ResultDesc?.includes("in process")) {
-          return res.json({ state: "PENDING", message: data.ResultDesc });
-        }
-        return res.json({ state: "FAILED", message: data.ResultDesc || "Payment failed" });
-      }
-    }
-
-    res.json({ state: "PENDING", message: data.ResultDesc || "Waiting for payment..." });
+    res.json({ state:"PENDING", message:"Waiting for payment..." });
   } catch(e) {
-    // If query fails it usually means still processing
-    if (e.response?.data?.errorCode === "500.001.1001") {
-      return res.json({ state: "PENDING", message: "Still processing..." });
+    // 500.001.1001 = transaction in progress (still pending)
+    const code = e.response?.data?.errorCode || "";
+    if (code === "500.001.1001" || code.includes("500")) {
+      return res.json({ state:"PENDING", message:"Processing — enter PIN on phone" });
     }
-    res.json({ state: "PENDING", message: "Checking..." });
+    log(`Query error: ${e.message}`);
+    res.json({ state:"PENDING", message:"Checking..." });
   }
 });
 
-// Daraja callback (Safaricom calls this after payment)
 app.post("/mpesa/callback", async (req, res) => {
-  log(`📲 Daraja callback: ${JSON.stringify(req.body)}`);
+  log(`📲 Callback: ${JSON.stringify(req.body)}`);
   try {
-    const callback = req.body?.Body?.stkCallback;
-    if (!callback) return res.json({ ResultCode: 0, ResultDesc: "OK" });
+    const cb = req.body?.Body?.stkCallback;
+    if (!cb) return res.json({ ResultCode:0, ResultDesc:"OK" });
 
-    const { ResultCode, CheckoutRequestID } = callback;
-
+    const { ResultCode, CheckoutRequestID } = cb;
     if (ResultCode === 0) {
-      // Payment successful
       const { data: payment } = await supabase.from("payments")
-        .select("*")
-        .eq("pesapal_tracking_id", CheckoutRequestID)
-        .single();
-
+        .select("*").eq("pesapal_tracking_id", CheckoutRequestID).single();
       if (payment && payment.status !== "completed") {
-        await supabase.from("payments").update({ status: "completed" })
+        await supabase.from("payments").update({ status:"completed" })
           .eq("pesapal_tracking_id", CheckoutRequestID);
         await activateSub(payment.user_id, payment.plan);
         log(`✅ Callback activated: ${payment.user_id} ${payment.plan}`);
       }
     } else {
-      await supabase.from("payments").update({ status: "failed" })
+      await supabase.from("payments").update({ status:"failed" })
         .eq("pesapal_tracking_id", CheckoutRequestID);
-      log(`❌ Payment failed: ${callback.ResultDesc}`);
+      log(`❌ Callback failed: ${cb.ResultDesc}`);
     }
-  } catch(e) {
-    log(`Callback error: ${e.message}`);
-  }
-  res.json({ ResultCode: 0, ResultDesc: "OK" });
+  } catch(e) { log(`Callback error: ${e.message}`); }
+  res.json({ ResultCode:0, ResultDesc:"OK" });
 });
 
 // ============ SUBSCRIPTION CHECK ============
@@ -381,7 +406,6 @@ async function fetchCandles(symbol,interval){
 async function runAnalysis(){
   if(isAnalyzing)return;isAnalyzing=true;
   const tf=TIMEFRAMES[tfIndex%TIMEFRAMES.length];tfIndex++;
-  log(`🎯 Analysis TF:${tf}`);
   for(const pair of PAIRS){
     try{
       await wait(10000);
@@ -391,44 +415,34 @@ async function runAnalysis(){
       if(!a)continue;
       const key=`${pair.symbol}_${tf}`,prev=signals[key]?.signal;
       signals[key]={...a,symbol:pair.symbol,timeframe:tf,type:pair.type,timestamp:new Date().toISOString(),price:candles[0]?.close};
-      log(`✅ ${pair.symbol} ${tf}: ${a.signal} ${a.confidence}%`);
       if(a.signal!=="WAIT"&&a.confidence>=80&&a.signal!==prev){
         try{await axios.post("https://onesignal.com/api/v1/notifications",{app_id:ONESIGNAL_APP_ID,included_segments:["All"],headings:{en:`⚡ APEX FX — ${pair.symbol}`},contents:{en:`${a.signal==="BUY"?"▲":"▼"} ${a.signal} ${a.confidence}%`},url:"https://apex-trading-eta.vercel.app",priority:10},{headers:{Authorization:`Bearer ${ONESIGNAL_API_KEY}`,"Content-Type":"application/json"},timeout:10000});}catch(e){}
       }
     }catch(e){log(`Error ${pair.symbol}: ${e.message}`);}
   }
   lastUpdated=new Date().toISOString();isAnalyzing=false;
-  log(`✅ Done. Signals: ${Object.keys(signals).length}`);
 }
 
-app.get("/signals/analyze", async (req,res) => {
-  const {symbol,interval}=req.query;
-  if(!symbol||!interval)return res.json({error:"required: symbol, interval"});
-  try{
-    const candles=await fetchCandles(symbol,interval);
-    if(!candles||candles.length<30)return res.json({error:`No data for ${symbol}`});
-    const market=sniperAnalysis(symbol,interval,candles);
-    if(!market)return res.json({error:"Analysis failed"});
-    res.json({symbol,timeframe:interval,price:candles[0]?.close,timestamp:new Date().toISOString(),market});
-  }catch(e){res.json({error:e.message});}
-});
-
-app.get("/", (req,res)=>res.json({status:"APEX FX Server ✅",lastUpdated,signals:Object.keys(signals).length,isAnalyzing,provider:"Safaricom Daraja"}));
+app.get("/signals/analyze",async(req,res)=>{const{symbol,interval}=req.query;if(!symbol||!interval)return res.json({error:"required"});try{const c=await fetchCandles(symbol,interval);if(!c||c.length<30)return res.json({error:`No data`});const m=sniperAnalysis(symbol,interval,c);if(!m)return res.json({error:"failed"});res.json({symbol,timeframe:interval,price:c[0]?.close,timestamp:new Date().toISOString(),market:m});}catch(e){res.json({error:e.message});}});
+app.get("/",(req,res)=>res.json({status:"APEX FX ✅",mode:IS_SANDBOX?"SANDBOX":"PRODUCTION",till:DARAJA_TILL,lastUpdated,signals:Object.keys(signals).length}));
 app.get("/signals",(req,res)=>res.json({signals,lastUpdated,isAnalyzing}));
 app.get("/logs",(req,res)=>res.json({logs}));
-app.get("/health",(req,res)=>res.json({ok:true,time:new Date().toISOString()}));
+app.get("/health",(req,res)=>res.json({ok:true,time:new Date().toISOString(),daraja:IS_SANDBOX?"sandbox":"production"}));
 app.get("/trigger",(req,res)=>{runAnalysis();res.json({message:"triggered"});});
 app.post("/trigger",(req,res)=>{runAnalysis();res.json({message:"triggered"});});
 
-cron.schedule("*/5 * * * *",()=>{log("⏰ Scheduled");runAnalysis();});
+cron.schedule("*/5 * * * *",()=>{runAnalysis();});
 
 setInterval(async()=>{
-  try{await axios.get(`http://localhost:${process.env.PORT||3000}/health`,{timeout:5000});log("🏓 Keep-alive");}catch(e){}
+  try{await axios.get(`http://localhost:${process.env.PORT||3000}/health`,{timeout:5000});}catch(e){}
 },14*60*1000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  log(`🚀 APEX FX Server port ${PORT} — Safaricom Daraja M-Pesa`);
-  try { await getDarajaToken(); } catch(e) { log(`Token error: ${e.message}`); }
+  log(`🚀 APEX FX Server port ${PORT}`);
+  log(`📱 Daraja mode: ${IS_SANDBOX?"SANDBOX (sandbox.safaricom.co.ke)":"PRODUCTION (api.safaricom.co.ke)"}`);
+  log(`📱 Till: ${DARAJA_TILL}`);
+  try { await getDarajaToken(); log("✅ Daraja ready"); }
+  catch(e) { log(`⚠ Daraja token failed: ${e.message}`); }
   setTimeout(runAnalysis, 5000);
 });
