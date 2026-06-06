@@ -121,7 +121,7 @@ async function stkPush(phone, amount, orderId, planName) {
     PhoneNumber:       p,
     CallBackURL:       DARAJA_CALLBACK_URL,
     AccountReference:  orderId.slice(0, 12),
-    TransactionDesc:   `APEX FX ${planName}`,
+    TransactionDesc:   `PrinceX Academy ${planName}`,
   };
 
   log(`STK payload: ${JSON.stringify({ ...payload, Password:"***" })}`);
@@ -416,7 +416,7 @@ async function runAnalysis(){
       const key=`${pair.symbol}_${tf}`,prev=signals[key]?.signal;
       signals[key]={...a,symbol:pair.symbol,timeframe:tf,type:pair.type,timestamp:new Date().toISOString(),price:candles[0]?.close};
       if(a.signal!=="WAIT"&&a.confidence>=80&&a.signal!==prev){
-        try{await axios.post("https://onesignal.com/api/v1/notifications",{app_id:ONESIGNAL_APP_ID,included_segments:["All"],headings:{en:`⚡ APEX FX — ${pair.symbol}`},contents:{en:`${a.signal==="BUY"?"▲":"▼"} ${a.signal} ${a.confidence}%`},url:"https://apex-trading-eta.vercel.app",priority:10},{headers:{Authorization:`Bearer ${ONESIGNAL_API_KEY}`,"Content-Type":"application/json"},timeout:10000});}catch(e){}
+        try{await axios.post("https://onesignal.com/api/v1/notifications",{app_id:ONESIGNAL_APP_ID,included_segments:["All"],headings:{en:`⚡ PrinceX Academy — ${pair.symbol}`},contents:{en:`${a.signal==="BUY"?"▲":"▼"} ${a.signal} ${a.confidence}%`},url:"https://apex-trading-eta.vercel.app",priority:10},{headers:{Authorization:`Bearer ${ONESIGNAL_API_KEY}`,"Content-Type":"application/json"},timeout:10000});}catch(e){}
       }
     }catch(e){log(`Error ${pair.symbol}: ${e.message}`);}
   }
@@ -424,7 +424,7 @@ async function runAnalysis(){
 }
 
 app.get("/signals/analyze",async(req,res)=>{const{symbol,interval}=req.query;if(!symbol||!interval)return res.json({error:"required"});try{const c=await fetchCandles(symbol,interval);if(!c||c.length<30)return res.json({error:`No data`});const m=sniperAnalysis(symbol,interval,c);if(!m)return res.json({error:"failed"});res.json({symbol,timeframe:interval,price:c[0]?.close,timestamp:new Date().toISOString(),market:m});}catch(e){res.json({error:e.message});}});
-app.get("/",(req,res)=>res.json({status:"APEX FX ✅",mode:IS_SANDBOX?"SANDBOX":"PRODUCTION",till:DARAJA_TILL,lastUpdated,signals:Object.keys(signals).length}));
+app.get("/",(req,res)=>res.json({status:"PrinceX Academy ✅",mode:IS_SANDBOX?"SANDBOX":"PRODUCTION",till:DARAJA_TILL,lastUpdated,signals:Object.keys(signals).length}));
 app.get("/signals",(req,res)=>res.json({signals,lastUpdated,isAnalyzing}));
 app.get("/logs",(req,res)=>res.json({logs}));
 app.get("/health",(req,res)=>res.json({ok:true,time:new Date().toISOString(),daraja:IS_SANDBOX?"sandbox":"production"}));
@@ -439,7 +439,7 @@ setInterval(async()=>{
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  log(`🚀 APEX FX Server port ${PORT}`);
+  log(`🚀 PrinceX Academy Server port ${PORT}`);
   log(`📱 Daraja mode: ${IS_SANDBOX?"SANDBOX (sandbox.safaricom.co.ke)":"PRODUCTION (api.safaricom.co.ke)"}`);
   log(`📱 Till: ${DARAJA_TILL}`);
   try { await getDarajaToken(); log("✅ Daraja ready"); }
