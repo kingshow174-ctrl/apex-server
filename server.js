@@ -446,3 +446,273 @@ app.listen(PORT, async () => {
   catch(e) { log(`⚠ Daraja token failed: ${e.message}`); }
   setTimeout(runAnalysis, 5000);
 });
+
+// ============ POCKET OPTION AUTO ============
+const PO_PAIRS = [
+  { symbol:"EUR/USD",  type:"forex",  flag:"🇪🇺🇺🇸" },
+  { symbol:"GBP/USD",  type:"forex",  flag:"🇬🇧🇺🇸" },
+  { symbol:"USD/JPY",  type:"forex",  flag:"🇺🇸🇯🇵" },
+  { symbol:"AUD/USD",  type:"forex",  flag:"🇦🇺🇺🇸" },
+  { symbol:"USD/CAD",  type:"forex",  flag:"🇺🇸🇨🇦" },
+  { symbol:"EUR/GBP",  type:"forex",  flag:"🇪🇺🇬🇧" },
+  { symbol:"USD/CHF",  type:"forex",  flag:"🇺🇸🇨🇭" },
+  { symbol:"EUR/JPY",  type:"forex",  flag:"🇪🇺🇯🇵" },
+  { symbol:"XAU/USD",  type:"commodity", flag:"🥇" },
+  { symbol:"BTC/USD",  type:"crypto", flag:"₿"    },
+  { symbol:"ETH/USD",  type:"crypto", flag:"Ξ"    },
+];
+
+let poSignals = {};
+let poLastUpdated = null;
+let poAnalyzing = false;
+
+function calcBuyersSellers(closes, highs, lows, rsi, macd, ema9, ema21) {
+  // Simulate order book sentiment from indicators
+  const signals = [];
+
+  // RSI — classic buyer/seller indicator
+  if (rsi !== null) {
+    if (rsi > 50) signals.push({ bull: rsi, bear: 100 - rsi });
+    else signals.push({ bull: rsi, bear: 100 - rsi });
+  }
+
+  // Price vs EMA — trend buyers/sellers
+  if (ema9 && ema21) {
+    const latest = parseFloat(closes[0]);
+    const emaStrength = Math.min(Math.abs(ema9 - ema21) / ema21 * 5000, 30);
+    if (ema9 > ema21) signals.push({ bull: 60 + emaStrength, bear: 40 - emaStrength });
+    else signals.push({ bull: 40 - emaStrength, bear: 60 + emaStrength });
+  }
+
+  // MACD histogram
+  if (macd) {
+    const h = macd.histogram;
+    const strength = Math.min(Math.abs(h) * 10000, 25);
+    if (h > 0) signals.push({ bull: 55 + strength, bear: 45 - strength });
+    else signals.push({ bull: 45 - strength, bear: 55 + strength });
+  }
+
+  // Recent candle momentum (last 5 candles)
+  let bullCandles = 0, bearCandles = 0;
+  for (let i = 0; i < Math.min(5, closes.length - 1); i++) {
+    if (parseFloat(closes[i]) > parseFloat(closes[i+1])) bullCandles++;
+    else bearCandles++;
+  }
+  const total = bullCandles + bearCandles;
+  if (total > 0) signals.push({ bull: (bullCandles/total)*100, bear: (bearCandles/total)*100 });
+
+  // Average all signals
+  if (signals.length === 0) return { buyers: 50, sellers: 50 };
+  const avgBull = signals.reduce((a,s) => a + s.bull, 0) / signals.length;
+  const avgBear = signals.reduce((a,s) => a + s.bear, 0) / signals.length;
+  const sum = avgBull + avgBear;
+  return {
+    buyers:  Math.round((avgBull / sum) * 100),
+    sellers: Math.round((avgBear / sum) * 100),
+  };
+}
+
+function predictNext3Candles(closes, highs, lows, signal, confidence, atr) {
+  const latest = parseFloat(closes[0]);
+  const candles = [];
+  const decayFactor = 0.88; // confidence drops slightly each candle
+
+  for (let i = 1; i <= 3; i++) {
+    const candleConf = Math.round(confidence * Math.pow(decayFactor, i - 1));
+    const direction = signal === "BUY" ? "UP" : signal === "SELL" ? "DOWN" : i % 2 === 0 ? "DOWN" : "UP";
+
+    // Strength based on confidence
+    const strength = candleConf >= 82 ? "STRONG" : candleConf >= 70 ? "MEDIUM" : "WEAK";
+
+    // Expected price movement
+    const move = atr * (0.4 + (i * 0.1));
+    const target = signal === "BUY"
+      ? (latest + move * i).toFixed(5)
+      : signal === "SELL"
+      ? (latest - move * i).toFixed(5)
+      : latest.toFixed(5);
+
+    candles.push({
+      number: i,
+      direction,
+      strength,
+      confidence: candleConf,
+      target,
+      reason: i === 1
+        ? `Momentum continuation from ${signal} signal`
+        : i === 2
+        ? `Trend holding with ${strength.toLowerCase()} pressure`
+        : `Final candle — watch for reversal if ${signal === "BUY" ? "resistance" : "support"} hit`,
+    });
+  }
+  return candles;
+}
+
+async function analyzePOPair(pair) {
+  try {
+    const candles = await fetchCandles(pair.symbol, "1min");
+    if (!candles || candles.length < 30) return null;
+
+    const closes  = candles.map(c => parseFloat(c.close));
+    const highs   = candles.map(c => parseFloat(c.high));
+    const lows    = candles.map(c => parseFloat(c.low));
+    const volumes = candles.map(c => parseFloat(c.volume) || 0);
+    const latest  = closes[0];
+
+    // Calculate all indicators
+    const ema9  = calcEMA(closes, 9);
+    const ema21 = calcEMA(closes, 21);
+    const ema50 = calcEMA(closes, 50);
+    const sma20 = calcSMA(closes, 20);
+    const rsi   = calcRSI(closes, 14);
+    const macd  = calcMACD(closes);
+    const atr   = calcATR(highs, lows, closes, 14);
+
+    if (!atr) return null;
+
+    // VWAP
+    let cumTPV = 0, cumVol = 0;
+    for (let i = 0; i < closes.length; i++) {
+      const tp = (highs[i]+lows[i]+closes[i])/3;
+      cumTPV += tp * volumes[i]; cumVol += volumes[i];
+    }
+    const vwap = cumVol > 0 ? cumTPV / cumVol : null;
+
+    // Supertrend
+    const stMult = 3;
+    const stUpper = ((highs[0]+lows[0])/2) + stMult * atr;
+    const stLower = ((highs[0]+lows[0])/2) - stMult * atr;
+    const supertrend = closes[1] > stLower ? 1 : -1;
+
+    // Candle pattern
+    const o0 = parseFloat(candles[0].open), h0 = highs[0], l0 = lows[0], c0 = closes[0];
+    const o1 = parseFloat(candles[1].open), c1 = closes[1];
+    const body0 = Math.abs(c0-o0), range0 = h0-l0;
+    const upper0 = h0-Math.max(c0,o0), lower0 = Math.min(c0,o0)-l0;
+
+    let pattern = "No Pattern", patternBias = 0;
+    if (body0 < range0*0.05) { pattern="Doji"; patternBias=0; }
+    else if (lower0>body0*2&&upper0<body0*0.3&&c0>o0) { pattern="Hammer"; patternBias=1; }
+    else if (upper0>body0*2&&lower0<body0*0.3) { pattern="Shooting Star"; patternBias=-1; }
+    else if (c0>o0&&c1<o1&&c0>o1&&o0<c1) { pattern="Bullish Engulfing"; patternBias=1; }
+    else if (c0<o0&&c1>o1&&c0<o1&&o0>c1) { pattern="Bearish Engulfing"; patternBias=-1; }
+    else if (lower0>range0*0.6&&body0<range0*0.3) { pattern="Bullish Pinbar"; patternBias=1; }
+    else if (upper0>range0*0.6&&body0<range0*0.3) { pattern="Bearish Pinbar"; patternBias=-1; }
+    else if (c0>o0&&c1>o1&&closes[2]>parseFloat(candles[2].open)) { pattern="Three White Soldiers"; patternBias=1; }
+    else if (c0<o0&&c1<o1&&closes[2]<parseFloat(candles[2].open)) { pattern="Three Black Crows"; patternBias=-1; }
+    else { pattern=c0>o0?"Bullish Candle":"Bearish Candle"; patternBias=c0>o0?0.5:-0.5; }
+
+    // Vote system
+    const votes = [], indicators = {};
+
+    if (ema9&&ema21) { const v=ema9>ema21?1:-1; votes.push(v); indicators.emaCross={vote:v,label:v>0?"BULL":"BEAR",value:`${v>0?"▲":"▼"} EMA9 ${v>0?"above":"below"} EMA21`}; }
+    if (ema50) { const v=latest>ema50?1:-1; votes.push(v); indicators.ema50={vote:v,label:v>0?"BULL":"BEAR",value:`Price ${v>0?"above":"below"} EMA50`}; }
+    if (rsi!==null) { const v=rsi<30?1:rsi>70?-1:rsi<45?0.5:-0.5; votes.push(v); indicators.rsi={vote:v,label:rsi<30?"OVERSOLD":rsi>70?"OVERBOUGHT":rsi<50?"NEUTRAL↑":"NEUTRAL↓",value:`RSI: ${rsi.toFixed(1)}`}; }
+    if (macd) { const v=macd.histogram>0?1:-1; votes.push(v); indicators.macd={vote:v,label:v>0?"BULL":"BEAR",value:`MACD ${v>0?"positive":"negative"}`}; }
+    if (vwap) { const v=latest>vwap?1:-1; votes.push(v); indicators.vwap={vote:v,label:v>0?"ABOVE VWAP":"BELOW VWAP",value:`VWAP: ${vwap.toFixed(5)}`}; }
+    if (sma20) { const v=latest>sma20?1:-1; votes.push(v); indicators.sma20={vote:v,label:v>0?"BULL":"BEAR",value:`Price ${v>0?"above":"below"} SMA20`}; }
+    votes.push(supertrend); indicators.supertrend={vote:supertrend,label:supertrend>0?"BULL":"BEAR",value:`Supertrend ${supertrend>0?"support":"resistance"}`};
+    if (patternBias!==0) { const v=patternBias>0?1:-1; votes.push(v); indicators.pattern={vote:v,label:v>0?"BULLISH":"BEARISH",value:pattern}; }
+    const mom=((closes[0]-closes[4])/closes[4])*100;
+    const mv=mom>0.05?1:mom<-0.05?-1:0; votes.push(mv); indicators.momentum={vote:mv,label:mv>0?"POSITIVE":mv<0?"NEGATIVE":"FLAT",value:`Momentum: ${mom.toFixed(3)}%`};
+
+    const bullV = votes.filter(v=>v>0).length;
+    const bearV = votes.filter(v=>v<0).length;
+    const totalV = votes.length;
+    const bullScore = Math.round((bullV/totalV)*100);
+    const bearScore = Math.round((bearV/totalV)*100);
+
+    let signal="WAIT", confidence=50;
+    if (bullScore>=75) { signal="BUY"; confidence=bullScore; }
+    else if (bearScore>=75) { signal="SELL"; confidence=bearScore; }
+
+    // Buyers/Sellers sentiment
+    const { buyers, sellers } = calcBuyersSellers(closes, highs, lows, rsi, macd, ema9, ema21);
+
+    // Next 3 candles prediction
+    const next3 = predictNext3Candles(closes, highs, lows, signal, confidence, atr);
+
+    // TP/SL
+    const swingH=Math.max(...highs.slice(0,5)), swingL=Math.min(...lows.slice(0,5));
+    let sl, tp1, tp2, tp3;
+    if (signal==="BUY") { sl=Math.min(swingL,latest-atr*1.5); const r=latest-sl; tp1=latest+r*1.5; tp2=latest+r*3; tp3=latest+r*5; }
+    else if (signal==="SELL") { sl=Math.max(swingH,latest+atr*1.5); const r=sl-latest; tp1=latest-r*1.5; tp2=latest-r*3; tp3=latest-r*5; }
+    else { sl=latest-atr*1.5; tp1=latest+atr*1.5; tp2=latest+atr*3; tp3=latest+atr*5; }
+
+    return {
+      symbol: pair.symbol,
+      flag: pair.flag,
+      type: pair.type,
+      timeframe: "1min",
+      signal, confidence,
+      bullScore, bearScore,
+      bullVotes: bullV, bearVotes: bearV, totalVotes: totalV,
+      buyers, sellers,
+      pattern,
+      price: latest.toFixed(5),
+      entry: latest.toFixed(5),
+      sl: sl.toFixed(5), tp1: tp1.toFixed(5), tp2: tp2.toFixed(5), tp3: tp3.toFixed(5),
+      expiry: "3 minutes",
+      candles_to_hold: 3,
+      next3candles: next3,
+      indicators,
+      trend: bullScore > bearScore ? "Bullish trend" : "Bearish trend",
+      reason: `${bullV}/${totalV} indicators ${signal==="BUY"?"bullish":signal==="SELL"?"bearish":"neutral"}. ${pattern}. RSI:${rsi?rsi.toFixed(0):"N/A"}`,
+      timestamp: new Date().toISOString(),
+    };
+  } catch(e) {
+    log(`PO error ${pair.symbol}: ${e.message}`);
+    return null;
+  }
+}
+
+async function runPOAnalysis() {
+  if (poAnalyzing) return;
+  poAnalyzing = true;
+  log("🎯 Pocket Option analysis started");
+
+  for (const pair of PO_PAIRS) {
+    try {
+      await wait(8000);
+      const result = await analyzePOPair(pair);
+      if (result) {
+        poSignals[pair.symbol] = result;
+        log(`✅ PO ${pair.symbol}: ${result.signal} ${result.confidence}% B:${result.buyers}% S:${result.sellers}%`);
+      }
+    } catch(e) { log(`PO error ${pair.symbol}: ${e.message}`); }
+  }
+
+  poLastUpdated = new Date().toISOString();
+  poAnalyzing = false;
+  log(`✅ PO Analysis done. ${Object.keys(poSignals).length} pairs`);
+}
+
+app.get("/po/signals", (req, res) => {
+  res.json({ signals: poSignals, lastUpdated: poLastUpdated, isAnalyzing: poAnalyzing });
+});
+
+app.get("/po/trigger", (req, res) => {
+  runPOAnalysis();
+  res.json({ message: "PO analysis triggered" });
+});
+
+app.get("/po/pair/:symbol", async (req, res) => {
+  const symbol = decodeURIComponent(req.params.symbol);
+  const pair = PO_PAIRS.find(p => p.symbol === symbol);
+  if (!pair) return res.json({ error: "Pair not found" });
+  try {
+    await wait(0);
+    const result = await analyzePOPair(pair);
+    if (!result) return res.json({ error: "Analysis failed" });
+    res.json(result);
+  } catch(e) { res.json({ error: e.message }); }
+});
+
+// Run PO analysis every 1 minute
+cron.schedule("* * * * *", () => {
+  log("⏰ PO Scheduled");
+  runPOAnalysis();
+});
+
+// Initial run
+setTimeout(runPOAnalysis, 8000);
