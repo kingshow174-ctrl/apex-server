@@ -449,6 +449,36 @@ app.listen(PORT, async () => {
 
 // ============ POCKET OPTION AUTO ============
 const PO_PAIRS = [
+  { symbol:"EUR/USD",  type:"forex", flag:"🇪🇺🇺🇸" },
+  { symbol:"CAD/JPY",  type:"forex", flag:"🇨🇦🇯🇵" },
+  { symbol:"GBP/AUD",  type:"forex", flag:"🇬🇧🇦🇺" },
+  { symbol:"EUR/CAD",  type:"forex", flag:"🇪🇺🇨🇦" },
+  { symbol:"GBP/CAD",  type:"forex", flag:"🇬🇧🇨🇦" },
+  { symbol:"GBP/JPY",  type:"forex", flag:"🇬🇧🇯🇵" },
+  { symbol:"AUD/USD",  type:"forex", flag:"🇦🇺🇺🇸" },
+  { symbol:"CHF/JPY",  type:"forex", flag:"🇨🇭🇯🇵" },
+  { symbol:"AUD/CHF",  type:"forex", flag:"🇦🇺🇨🇭" },
+  { symbol:"GBP/CHF",  type:"forex", flag:"🇬🇧🇨🇭" },
+  { symbol:"AUD/CAD",  type:"forex", flag:"🇦🇺🇨🇦" },
+  { symbol:"GBP/USD",  type:"forex", flag:"🇬🇧🇺🇸" },
+  { symbol:"USD/JPY",  type:"forex", flag:"🇺🇸🇯🇵" },
+  { symbol:"USD/CHF",  type:"forex", flag:"🇺🇸🇨🇭" },
+  { symbol:"USD/CAD",  type:"forex", flag:"🇺🇸🇨🇦" },
+  { symbol:"EUR/JPY",  type:"forex", flag:"🇪🇺🇯🇵" },
+  { symbol:"EUR/AUD",  type:"forex", flag:"🇪🇺🇦🇺" },
+  { symbol:"EUR/NZD",  type:"forex", flag:"🇪🇺🇳🇿" },
+  { symbol:"EUR/CHF",  type:"forex", flag:"🇪🇺🇨🇭" },
+  { symbol:"AUD/JPY",  type:"forex", flag:"🇦🇺🇯🇵" },
+  { symbol:"AUD/NZD",  type:"forex", flag:"🇦🇺🇳🇿" },
+  { symbol:"CAD/CHF",  type:"forex", flag:"🇨🇦🇨🇭" },
+  { symbol:"NZD/USD",  type:"forex", flag:"🇳🇿🇺🇸" },
+  { symbol:"NZD/JPY",  type:"forex", flag:"🇳🇿🇯🇵" },
+  { symbol:"NZD/CAD",  type:"forex", flag:"🇳🇿🇨🇦" },
+  { symbol:"NZD/CHF",  type:"forex", flag:"🇳🇿🇨🇭" },
+  { symbol:"EUR/GBP",  type:"forex", flag:"🇪🇺🇬🇧" },
+  { symbol:"XAU/USD",  type:"commodity", flag:"🥇" },
+  { symbol:"BTC/USD",  type:"crypto", flag:"₿" },
+  // REMOVE OLD DUPLICATE ENTRIES BELOW
   { symbol:"EUR/USD",  type:"forex",  flag:"🇪🇺🇺🇸" },
   { symbol:"GBP/USD",  type:"forex",  flag:"🇬🇧🇺🇸" },
   { symbol:"USD/JPY",  type:"forex",  flag:"🇺🇸🇯🇵" },
@@ -716,3 +746,18 @@ cron.schedule("* * * * *", () => {
 
 // Initial run
 setTimeout(runPOAnalysis, 8000);
+
+// Fast single pair PO signal
+app.get("/po/get/:symbol", async (req, res) => {
+  const symbol = decodeURIComponent(req.params.symbol);
+  const pair = { symbol, flag: "📊", type: symbol.includes("USD") ? "forex" : "forex" };
+  try {
+    log(`⚡ Fast PO signal: ${symbol}`);
+    const result = await analyzePOPair(pair);
+    if (!result) return res.json({ error: `No data for ${symbol}` });
+    res.json(result);
+  } catch(e) {
+    log(`Fast PO error: ${e.message}`);
+    res.json({ error: e.message });
+  }
+});
