@@ -448,6 +448,7 @@ app.listen(PORT, async () => {
 });
 
 
+
 // ============ POCKET OPTION AUTO ============
 const PO_PAIRS = [
   { symbol:"EUR/USD",  type:"forex",     flag:"🇪🇺🇺🇸" },
@@ -486,58 +487,87 @@ let poSignals = {};
 let poLastUpdated = null;
 let poAnalyzing = false;
 
-function calcBuyersSellers(closes, highs, lows, rsi, macd, ema9, ema21) {
-  const signals = [];
-  if (rsi !== null) signals.push({ bull: rsi, bear: 100 - rsi });
+function getBuyersSellers(closes, rsi, macd, ema9, ema21) {
+  const arr = [];
+  if (rsi !== null && rsi !== undefined) {
+    arr.push({ b: rsi, s: 100 - rsi });
+  }
   if (ema9 && ema21) {
     const str = Math.min(Math.abs(ema9 - ema21) / (ema21 || 1) * 5000, 30);
-    signals.push(ema9 > ema21 ? { bull: 60 + str, bear: 40 - str } : { bull: 40 - str, bear: 60 + str });
+    if (ema9 > ema21) arr.push({ b: 60 + str, s: 40 - str });
+    else arr.push({ b: 40 - str, s: 60 + str });
   }
-  if (macd) {
+  if (macd && macd.histogram !== undefined) {
     const str = Math.min(Math.abs(macd.histogram) * 10000, 25);
-    signals.push(macd.histogram > 0 ? { bull: 55 + str, bear: 45 - str } : { bull: 45 - str, bear: 55 + str });
+    if (macd.histogram > 0) arr.push({ b: 55 + str, s: 45 - str });
+    else arr.push({ b: 45 - str, s: 55 + str });
   }
-  let bc = 0, brc = 0;
+  let bc = 0, sc2 = 0;
   for (let i = 0; i < Math.min(5, closes.length - 1); i++) {
-    parseFloat(closes[i]) > parseFloat(closes[i+1]) ? bc++ : brc++;
+    if (closes[i] > closes[i+1]) bc++; else sc2++;
   }
-  const tot = bc + brc;
-  if (tot > 0) signals.push({ bull: (bc/tot)*100, bear: (brc/tot)*100 });
-  if (signals.length === 0) return { buyers: 50, sellers: 50 };
-  const ab = signals.reduce((a,s) => a + s.bull, 0) / signals.length;
-  const ae = signals.reduce((a,s) => a + s.bear, 0) / signals.length;
-  const sum = ab + ae;
-  return { buyers: Math.round((ab/sum)*100), sellers: Math.round((ae/sum)*100) };
+  const tot = bc + sc2;
+  if (tot > 0) arr.push({ b: (bc/tot)*100, s: (sc2/tot)*100 });
+  if (arr.length === 0) return { buyers: 50, sellers: 50 };
+  const ab = arr.reduce((a,x) => a + x.b, 0) / arr.length;
+  const as2 = arr.reduce((a,x) => a + x.s, 0) / arr.length;
+  const sum = ab + as2;
+  return { buyers: Math.round((ab/sum)*100), sellers: Math.round((as2/sum)*100) };
 }
 
-function predictNext3(closes, highs, lows, signal, confidence, atr) {
-  const candles = [];
+function getNext3(signal, confidence, atr) {
   const decay = 0.88;
+  const result = [];
   for (let i = 1; i <= 3; i++) {
     const conf = Math.round(confidence * Math.pow(decay, i - 1));
-    const dir = signal === "BUY" ? "UP" : signal === "SELL" ? "DOWN" : i % 2 === 0 ? "DOWN" : "UP";
+    let dir = "UP";
+    if (signal === "SELL") dir = "DOWN";
+    else if (signal === "WAIT") dir = i % 2 === 0 ? "DOWN" : "UP";
     const str = conf >= 82 ? "STRONG" : conf >= 70 ? "MEDIUM" : "WEAK";
-    candles.push({
-      number: i, direction: dir, strength: str, confidence: conf,
-      reason: i === 1 ? "Momentum continuation from signal"
-            : i === 2 ? "Trend holding with " + str.toLowerCase() + " pressure"
-            : "Final candle — watch for reversal",
-    });
+    let reason = "Momentum continuation";
+    if (i === 2) reason = "Trend holding with " + str.toLowerCase() + " pressure";
+    if (i === 3) reason = "Final candle - watch for reversal";
+    result.push({ number: i, direction: dir, strength: str, confidence: conf, reason });
   }
-  return candles;
+  return result;
 }
 
-async function analyzePOPair(pair) {
+function getPattern(candles) {
   try {
+    const o0=parseFloat(candles[0].open), h0=parseFloat(candles[0].high);
+    const l0=parseFloat(candles[0].low), c0=parseFloat(candles[0].close);
+    const o1=parseFloat(candles[1].open), c1=parseFloat(candles[1].close);
+    const body0=Math.abs(c0-o0), range0=h0-l0;
+    const upper0=h0-Math.max(c0,o0), lower0=Math.min(c0,o0)-l0;
+    if (range0 < 0.00001) return { name:"Doji", bias:0 };
+    if (body0 < range0*0.05) return { name:"Doji", bias:0 };
+    if (lower0>body0*2 && upper0<body0*0.3 && c0>o0) return { name:"Hammer", bias:1 };
+    if (upper0>body0*2 && lower0<body0*0.3) return { name:"Shooting Star", bias:-1 };
+    if (c0>o0 && c1<o1 && c0>o1 && o0<c1) return { name:"Bullish Engulfing", bias:1 };
+    if (c0<o0 && c1>o1 && c0<o1 && o0>c1) return { name:"Bearish Engulfing", bias:-1 };
+    if (lower0>range0*0.6 && body0<range0*0.3) return { name:"Bullish Pinbar", bias:1 };
+    if (upper0>range0*0.6 && body0<range0*0.3) return { name:"Bearish Pinbar", bias:-1 };
+    const c2=parseFloat(candles[2].close), o2=parseFloat(candles[2].open);
+    if (c0>o0 && c1>o1 && c2>o2) return { name:"Three White Soldiers", bias:1 };
+    if (c0<o0 && c1<o1 && c2<o2) return { name:"Three Black Crows", bias:-1 };
+    return { name: c0>o0 ? "Bullish Candle" : "Bearish Candle", bias: c0>o0 ? 0.5 : -0.5 };
+  } catch(e) { return { name:"Unknown", bias:0 }; }
+}
+
+async function analyzePO(pair) {
+  try {
+    log("Fetching candles for " + pair.symbol);
     const candles = await fetchCandles(pair.symbol, "1min");
     if (!candles || candles.length < 30) {
-      log("No candles for " + pair.symbol);
+      log("No candles for " + pair.symbol + ": got " + (candles ? candles.length : 0));
       return null;
     }
+    log("Got " + candles.length + " candles for " + pair.symbol);
+
     const closes  = candles.map(c => parseFloat(c.close));
     const highs   = candles.map(c => parseFloat(c.high));
     const lows    = candles.map(c => parseFloat(c.low));
-    const volumes = candles.map(c => parseFloat(c.volume) || 0);
+    const volumes = candles.map(c => parseFloat(c.volume) || 1);
     const latest  = closes[0];
 
     const ema9  = calcEMA(closes, 9);
@@ -547,76 +577,138 @@ async function analyzePOPair(pair) {
     const rsi   = calcRSI(closes, 14);
     const macd  = calcMACD(closes);
     const atr   = calcATR(highs, lows, closes, 14);
-    if (!atr) return null;
 
+    if (!atr || atr === 0) { log("ATR is 0 for " + pair.symbol); return null; }
+
+    // VWAP
     let cumTPV = 0, cumVol = 0;
     for (let i = 0; i < closes.length; i++) {
       const tp = (highs[i]+lows[i]+closes[i])/3;
-      cumTPV += tp * volumes[i]; cumVol += volumes[i];
+      cumTPV += tp * (volumes[i]||1);
+      cumVol += (volumes[i]||1);
     }
     const vwap = cumVol > 0 ? cumTPV / cumVol : null;
 
-    const stUpper = ((highs[0]+lows[0])/2) + 3*atr;
+    // Supertrend
     const stLower = ((highs[0]+lows[0])/2) - 3*atr;
     const supertrend = closes[1] > stLower ? 1 : -1;
 
-    const o0=parseFloat(candles[0].open), h0=highs[0], l0=lows[0], c0=closes[0];
-    const o1=parseFloat(candles[1].open), c1=closes[1];
-    const body0=Math.abs(c0-o0), range0=h0-l0;
-    const upper0=h0-Math.max(c0,o0), lower0=Math.min(c0,o0)-l0;
+    // Pattern
+    const pat = getPattern(candles);
 
-    let pattern="No Pattern", patBias=0;
-    if (body0<range0*0.05)                       { pattern="Doji";               patBias=0;  }
-    else if (lower0>body0*2&&upper0<body0*0.3&&c0>o0) { pattern="Hammer";        patBias=1;  }
-    else if (upper0>body0*2&&lower0<body0*0.3)   { pattern="Shooting Star";      patBias=-1; }
-    else if (c0>o0&&c1<o1&&c0>o1&&o0<c1)         { pattern="Bullish Engulfing";  patBias=1;  }
-    else if (c0<o0&&c1>o1&&c0<o1&&o0>c1)         { pattern="Bearish Engulfing";  patBias=-1; }
-    else if (lower0>range0*0.6&&body0<range0*0.3) { pattern="Bullish Pinbar";    patBias=1;  }
-    else if (upper0>range0*0.6&&body0<range0*0.3) { pattern="Bearish Pinbar";    patBias=-1; }
-    else if (c0>o0&&c1>o1&&closes[2]>parseFloat(candles[2].open)) { pattern="Three White Soldiers"; patBias=1; }
-    else if (c0<o0&&c1<o1&&closes[2]<parseFloat(candles[2].open)) { pattern="Three Black Crows";    patBias=-1; }
-    else { pattern=c0>o0?"Bullish Candle":"Bearish Candle"; patBias=c0>o0?0.5:-0.5; }
+    // Votes
+    const votes = [];
+    const inds = {};
 
-    const votes=[]; const inds={};
-    if (ema9&&ema21)  { const v=ema9>ema21?1:-1; votes.push(v); inds.emaCross={vote:v,label:v>0?"BULL":"BEAR",value:"EMA9 "+(v>0?"above":"below")+" EMA21"}; }
-    if (ema50)        { const v=latest>ema50?1:-1; votes.push(v); inds.ema50={vote:v,label:v>0?"BULL":"BEAR",value:"Price "+(v>0?"above":"below")+" EMA50"}; }
-    if (rsi!==null)   { const v=rsi<30?1:rsi>70?-1:rsi<45?0.5:-0.5; votes.push(v); inds.rsi={vote:v,label:rsi<30?"OVERSOLD":rsi>70?"OVERBOUGHT":"NEUTRAL",value:"RSI: "+rsi.toFixed(1)}; }
-    if (macd)         { const v=macd.histogram>0?1:-1; votes.push(v); inds.macd={vote:v,label:v>0?"BULL":"BEAR",value:"MACD "+(v>0?"positive":"negative")}; }
-    if (vwap)         { const v=latest>vwap?1:-1; votes.push(v); inds.vwap={vote:v,label:v>0?"ABOVE":"BELOW",value:"VWAP: "+vwap.toFixed(5)}; }
-    if (sma20)        { const v=latest>sma20?1:-1; votes.push(v); inds.sma20={vote:v,label:v>0?"BULL":"BEAR",value:"SMA20: "+sma20.toFixed(5)}; }
-    votes.push(supertrend); inds.supertrend={vote:supertrend,label:supertrend>0?"BULL":"BEAR",value:"Supertrend "+(supertrend>0?"support":"resistance")};
-    if (patBias!==0) { const v=patBias>0?1:-1; votes.push(v); inds.pattern={vote:v,label:v>0?"BULLISH":"BEARISH",value:pattern}; }
-    const mom=((closes[0]-closes[4])/closes[4])*100;
-    const mv=mom>0.05?1:mom<-0.05?-1:0; votes.push(mv); inds.momentum={vote:mv,label:mv>0?"POS":mv<0?"NEG":"FLAT",value:"Momentum: "+mom.toFixed(3)+"%"};
+    if (ema9 && ema21) {
+      const v = ema9 > ema21 ? 1 : -1;
+      votes.push(v);
+      inds.emaCross = { vote:v, label:v>0?"BULL":"BEAR", value:"EMA9 "+(v>0?"above":"below")+" EMA21" };
+    }
+    if (ema50) {
+      const v = latest > ema50 ? 1 : -1;
+      votes.push(v);
+      inds.ema50 = { vote:v, label:v>0?"BULL":"BEAR", value:"Price "+(v>0?"above":"below")+" EMA50" };
+    }
+    if (rsi !== null && rsi !== undefined) {
+      const v = rsi < 30 ? 1 : rsi > 70 ? -1 : rsi < 45 ? 0.5 : -0.5;
+      votes.push(v);
+      inds.rsi = { vote:v, label:rsi<30?"OVERSOLD":rsi>70?"OVERBOUGHT":"NEUTRAL", value:"RSI: "+rsi.toFixed(1) };
+    }
+    if (macd && macd.histogram !== undefined) {
+      const v = macd.histogram > 0 ? 1 : -1;
+      votes.push(v);
+      inds.macd = { vote:v, label:v>0?"BULL":"BEAR", value:"MACD histogram "+(v>0?"positive":"negative") };
+    }
+    if (vwap) {
+      const v = latest > vwap ? 1 : -1;
+      votes.push(v);
+      inds.vwap = { vote:v, label:v>0?"ABOVE":"BELOW", value:"VWAP: "+vwap.toFixed(5) };
+    }
+    if (sma20) {
+      const v = latest > sma20 ? 1 : -1;
+      votes.push(v);
+      inds.sma20 = { vote:v, label:v>0?"BULL":"BEAR", value:"SMA20: "+sma20.toFixed(5) };
+    }
 
-    const bullV=votes.filter(v=>v>0).length, bearV=votes.filter(v=>v<0).length, totalV=votes.length;
-    const bullScore=Math.round((bullV/totalV)*100), bearScore=Math.round((bearV/totalV)*100);
+    votes.push(supertrend);
+    inds.supertrend = { vote:supertrend, label:supertrend>0?"BULL":"BEAR", value:"Supertrend "+(supertrend>0?"support":"resistance") };
 
-    let signal="WAIT", confidence=50;
-    if (bullScore>=75) { signal="BUY";  confidence=bullScore; }
-    else if (bearScore>=75) { signal="SELL"; confidence=bearScore; }
+    if (pat.bias !== 0) {
+      const v = pat.bias > 0 ? 1 : -1;
+      votes.push(v);
+      inds.pattern = { vote:v, label:v>0?"BULLISH":"BEARISH", value:pat.name };
+    }
 
-    const { buyers, sellers } = calcBuyersSellers(closes, highs, lows, rsi, macd, ema9, ema21);
-    const next3 = predictNext3(closes, highs, lows, signal, confidence, atr);
+    const mom = closes.length > 4 ? ((closes[0]-closes[4])/closes[4])*100 : 0;
+    const mv = mom > 0.05 ? 1 : mom < -0.05 ? -1 : 0;
+    votes.push(mv);
+    inds.momentum = { vote:mv, label:mv>0?"POS":mv<0?"NEG":"FLAT", value:"Momentum: "+mom.toFixed(3)+"%" };
 
-    const swingH=Math.max(...highs.slice(0,5)), swingL=Math.min(...lows.slice(0,5));
+    const bullV = votes.filter(v => v > 0).length;
+    const bearV = votes.filter(v => v < 0).length;
+    const totalV = votes.length;
+    const bullScore = Math.round((bullV/totalV)*100);
+    const bearScore = Math.round((bearV/totalV)*100);
+
+    let signal = "WAIT";
+    let confidence = 50;
+    if (bullScore >= 75) { signal = "BUY";  confidence = bullScore; }
+    else if (bearScore >= 75) { signal = "SELL"; confidence = bearScore; }
+
+    const { buyers, sellers } = getBuyersSellers(closes, rsi, macd, ema9, ema21);
+    const next3 = getNext3(signal, confidence, atr);
+
+    const swingH = Math.max(...highs.slice(0,5));
+    const swingL = Math.min(...lows.slice(0,5));
     let sl, tp1, tp2, tp3;
-    if (signal==="BUY")  { sl=Math.min(swingL,latest-atr*1.5); const r=latest-sl; tp1=latest+r*1.5; tp2=latest+r*3; tp3=latest+r*5; }
-    else if (signal==="SELL") { sl=Math.max(swingH,latest+atr*1.5); const r=sl-latest; tp1=latest-r*1.5; tp2=latest-r*3; tp3=latest-r*5; }
-    else { sl=latest-atr*1.5; tp1=latest+atr*1.5; tp2=latest+atr*3; tp3=latest+atr*5; }
+
+    if (signal === "BUY") {
+      sl  = Math.min(swingL, latest - atr*1.5);
+      const r = latest - sl;
+      tp1 = latest + r*1.5; tp2 = latest + r*3; tp3 = latest + r*5;
+    } else if (signal === "SELL") {
+      sl  = Math.max(swingH, latest + atr*1.5);
+      const r = sl - latest;
+      tp1 = latest - r*1.5; tp2 = latest - r*3; tp3 = latest - r*5;
+    } else {
+      sl  = latest - atr*1.5;
+      tp1 = latest + atr*1.5; tp2 = latest + atr*3; tp3 = latest + atr*5;
+    }
+
+    const sigLabel = signal === "BUY" ? "bullish" : signal === "SELL" ? "bearish" : "neutral";
 
     return {
-      symbol:pair.symbol, flag:pair.flag, type:pair.type, timeframe:"1min",
-      signal, confidence, bullScore, bearScore, bullVotes:bullV, bearVotes:bearV, totalVotes:totalV,
-      buyers, sellers, pattern, price:latest.toFixed(5), entry:latest.toFixed(5),
-      sl:sl.toFixed(5), tp1:tp1.toFixed(5), tp2:tp2.toFixed(5), tp3:tp3.toFixed(5),
-      expiry:"3 minutes", candles_to_hold:3, next3candles:next3, indicators:inds,
-      trend:bullScore>bearScore?"Bullish":"Bearish",
-      reason:bullV+"/"+totalV+" indicators "+(signal==="BUY"?"bullish":signal==="SELL"?"bearish":"neutral")+". "+pattern,
-      timestamp:new Date().toISOString(),
+      symbol:      pair.symbol,
+      flag:        pair.flag,
+      type:        pair.type,
+      timeframe:   "1min",
+      signal,
+      confidence,
+      bullScore,
+      bearScore,
+      bullVotes:   bullV,
+      bearVotes:   bearV,
+      totalVotes:  totalV,
+      buyers,
+      sellers,
+      pattern:     pat.name,
+      price:       latest.toFixed(5),
+      entry:       latest.toFixed(5),
+      sl:          sl.toFixed(5),
+      tp1:         tp1.toFixed(5),
+      tp2:         tp2.toFixed(5),
+      tp3:         tp3.toFixed(5),
+      expiry:      "3 minutes",
+      candles_to_hold: 3,
+      next3candles: next3,
+      indicators:  inds,
+      trend:       bullScore > bearScore ? "Bullish" : "Bearish",
+      reason:      bullV + "/" + totalV + " indicators " + sigLabel + ". " + pat.name,
+      timestamp:   new Date().toISOString(),
     };
   } catch(e) {
-    log("PO error "+pair.symbol+": "+e.message);
+    log("analyzePO error " + pair.symbol + ": " + e.message);
     return null;
   }
 }
@@ -627,43 +719,45 @@ async function runPOAnalysis() {
   log("🟢 PO Analysis started");
   for (const pair of PO_PAIRS) {
     try {
-      await wait(8000);
-      const result = await analyzePOPair(pair);
+      await wait(7000);
+      const result = await analyzePO(pair);
       if (result) {
         poSignals[pair.symbol] = result;
-        log("✅ PO "+pair.symbol+": "+result.signal+" "+result.confidence+"% B:"+result.buyers+"% S:"+result.sellers+"%");
+        log("✅ PO " + pair.symbol + ": " + result.signal + " " + result.confidence + "%");
       }
-    } catch(e) { log("PO error "+pair.symbol+": "+e.message); }
+    } catch(e) { log("PO loop error " + pair.symbol + ": " + e.message); }
   }
   poLastUpdated = new Date().toISOString();
   poAnalyzing = false;
-  log("✅ PO done. "+Object.keys(poSignals).length+" pairs");
+  log("✅ PO done. " + Object.keys(poSignals).length + " signals");
 }
 
-// Routes
+// PO Routes
 app.get("/po/signals", (req, res) => {
-  res.json({ signals:poSignals, lastUpdated:poLastUpdated, isAnalyzing:poAnalyzing });
+  res.json({ signals: poSignals, lastUpdated: poLastUpdated, isAnalyzing: poAnalyzing });
 });
 
 app.get("/po/trigger", (req, res) => {
   runPOAnalysis();
-  res.json({ message:"PO analysis triggered" });
+  res.json({ message: "PO triggered" });
 });
 
 app.get("/po/get/:symbol", async (req, res) => {
   const symbol = decodeURIComponent(req.params.symbol);
+  log("⚡ PO GET: " + symbol);
   const pair = PO_PAIRS.find(p => p.symbol === symbol) || { symbol, flag:"📊", type:"forex" };
   try {
-    log("⚡ Fast PO: "+symbol);
-    const result = await analyzePOPair(pair);
-    if (!result) return res.json({ error:"No data for "+symbol+". Market may be closed." });
+    const result = await analyzePO(pair);
+    if (!result) {
+      return res.json({ error: "No data for " + symbol + ". Market may be closed or pair unavailable on free tier." });
+    }
     res.json(result);
   } catch(e) {
-    log("Fast PO error: "+e.message);
-    res.json({ error:e.message });
+    log("PO GET error: " + e.message);
+    res.json({ error: e.message });
   }
 });
 
-// Run every 1 min
+// Run PO every 1 min
 cron.schedule("* * * * *", () => { runPOAnalysis(); });
-setTimeout(runPOAnalysis, 10000);
+setTimeout(runPOAnalysis, 12000);
