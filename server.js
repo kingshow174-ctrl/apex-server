@@ -395,9 +395,23 @@ function sniperAnalysis(symbol,interval,candles){
   }catch(e){log(`Analysis error: ${e.message}`);return null;}
 }
 
+
+// Global rate limiter - max 6 calls per minute
+let lastApiCall = 0;
+async function rateLimitedFetch(url) {
+  const now = Date.now();
+  const elapsed = now - lastApiCall;
+  const minGap = 12000; // 12 seconds between calls = max 5/min
+  if (elapsed < minGap) {
+    await wait(minGap - elapsed);
+  }
+  lastApiCall = Date.now();
+  return axios.get(url, { timeout: 15000 });
+}
+
 async function fetchCandles(symbol,interval){
   try{
-    const res=await axios.get(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=60&apikey=${TWELVE_KEY}`,{timeout:15000});
+    const res=await rateLimitedFetch(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=60&apikey=${TWELVE_KEY}`);
     if(res.data.status==="error"){log(`TD Error ${symbol}: ${res.data.message}`);return null;}
     return res.data.values||null;
   }catch(e){log(`Fetch error: ${e.message}`);return null;}
@@ -408,7 +422,7 @@ async function runAnalysis(){
   const tf=TIMEFRAMES[tfIndex%TIMEFRAMES.length];tfIndex++;
   for(const pair of PAIRS){
     try{
-      await wait(10000);
+      await wait(20000);
       const candles=await fetchCandles(pair.symbol,tf);
       if(!candles||candles.length<30)continue;
       const a=sniperAnalysis(pair.symbol,tf,candles);
@@ -444,7 +458,7 @@ app.listen(PORT, async () => {
   log(`📱 Till: ${DARAJA_TILL}`);
   try { await getDarajaToken(); log("✅ Daraja ready"); }
   catch(e) { log(`⚠ Daraja token failed: ${e.message}`); }
-  setTimeout(runAnalysis, 30000);
+  setTimeout(runAnalysis, 60000);
 });
 
 
@@ -719,7 +733,7 @@ async function runPOAnalysis() {
   log("🟢 PO Analysis started");
   for (const pair of PO_PAIRS) {
     try {
-      await wait(15000);
+      await wait(20000);
       const result = await analyzePO(pair);
       if (result) {
         poSignals[pair.symbol] = result;
@@ -759,5 +773,5 @@ app.get("/po/get/:symbol", async (req, res) => {
 });
 
 // Run PO every 1 min
-cron.schedule("*/5 * * * *", () => { runPOAnalysis(); });
-setTimeout(runPOAnalysis, 90000);
+cron.schedule("*/10 * * * *", () => { runPOAnalysis(); });
+setTimeout(runPOAnalysis, 300000);
