@@ -19,7 +19,7 @@ app.use(express.json());
 // ============ CONFIG ============
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://xglwvuwxrlvyczhlhijp.supabase.co";
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
-const ADMIN_PASSKEY = process.env.ADMIN_PASSKEY || "APEXFX_ADMIN_2026_PRINCEX";
+const ADMIN_PASSKEY = process.env.ADMIN_PASSKEY || "PrinceX IQFX_ADMIN_2026_PRINCEX";
 const TWELVE_KEY = process.env.TWELVE_KEY || "62e0549bbdc04d76a224157e22da6bbd";
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://princex-iq.vercel.app";
 const ONESIGNAL_APP_ID = "9b174534-5638-46d0-9efb-071db011b02c";
