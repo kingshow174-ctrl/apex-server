@@ -458,7 +458,7 @@ app.listen(PORT, async () => {
   log(`📱 Till: ${DARAJA_TILL}`);
   try { await getDarajaToken(); log("✅ Daraja ready"); }
   catch(e) { log(`⚠ Daraja token failed: ${e.message}`); }
-  setTimeout(runAnalysis, 60000);
+  setTimeout(runAnalysis, 120000);
 });
 
 
@@ -773,5 +773,5 @@ app.get("/po/get/:symbol", async (req, res) => {
 });
 
 // Run PO every 1 min
-cron.schedule("*/10 * * * *", () => { runPOAnalysis(); });
+cron.schedule("*/30 * * * *", () => { runPOAnalysis(); });
 setTimeout(runPOAnalysis, 300000);
