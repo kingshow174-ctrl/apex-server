@@ -439,12 +439,12 @@ setInterval(async()=>{
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  log(`🚀 PrinceX Academy Server port ${PORT}`);
+  log(`🚀 PrinceX IQ Server port ${PORT}`);
   log(`📱 Daraja mode: ${IS_SANDBOX?"SANDBOX (sandbox.safaricom.co.ke)":"PRODUCTION (api.safaricom.co.ke)"}`);
   log(`📱 Till: ${DARAJA_TILL}`);
   try { await getDarajaToken(); log("✅ Daraja ready"); }
   catch(e) { log(`⚠ Daraja token failed: ${e.message}`); }
-  setTimeout(runAnalysis, 5000);
+  setTimeout(runAnalysis, 30000);
 });
 
 
@@ -719,7 +719,7 @@ async function runPOAnalysis() {
   log("🟢 PO Analysis started");
   for (const pair of PO_PAIRS) {
     try {
-      await wait(7000);
+      await wait(15000);
       const result = await analyzePO(pair);
       if (result) {
         poSignals[pair.symbol] = result;
@@ -759,5 +759,5 @@ app.get("/po/get/:symbol", async (req, res) => {
 });
 
 // Run PO every 1 min
-cron.schedule("* * * * *", () => { runPOAnalysis(); });
-setTimeout(runPOAnalysis, 12000);
+cron.schedule("*/5 * * * *", () => { runPOAnalysis(); });
+setTimeout(runPOAnalysis, 90000);
