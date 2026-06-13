@@ -21,7 +21,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "https://xglwvuwxrlvyczhlhijp.s
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const ADMIN_PASSKEY = process.env.ADMIN_PASSKEY || "APEXFX_ADMIN_2026_PRINCEX";
 const TWELVE_KEY = process.env.TWELVE_KEY || "62e0549bbdc04d76a224157e22da6bbd";
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://apex-trading-eta.vercel.app";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://princex-iq.vercel.app";
 const ONESIGNAL_APP_ID = "9b174534-5638-46d0-9efb-071db011b02c";
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY || "os_v2_app_tmlukncwhbdnbhx3a4o3aenqft7oc4a2664uo5nv3expvl2rh7arc4u3iwg5een2ybhtoxqvdslrb5zncgrhu4fzjrdt7lljm2ojtcq";
 
@@ -416,7 +416,7 @@ async function runAnalysis(){
       const key=`${pair.symbol}_${tf}`,prev=signals[key]?.signal;
       signals[key]={...a,symbol:pair.symbol,timeframe:tf,type:pair.type,timestamp:new Date().toISOString(),price:candles[0]?.close};
       if(a.signal!=="WAIT"&&a.confidence>=80&&a.signal!==prev){
-        try{await axios.post("https://onesignal.com/api/v1/notifications",{app_id:ONESIGNAL_APP_ID,included_segments:["All"],headings:{en:`⚡ PrinceX Academy — ${pair.symbol}`},contents:{en:`${a.signal==="BUY"?"▲":"▼"} ${a.signal} ${a.confidence}%`},url:"https://apex-trading-eta.vercel.app",priority:10},{headers:{Authorization:`Bearer ${ONESIGNAL_API_KEY}`,"Content-Type":"application/json"},timeout:10000});}catch(e){}
+        try{await axios.post("https://onesignal.com/api/v1/notifications",{app_id:ONESIGNAL_APP_ID,included_segments:["All"],headings:{en:`⚡ PrinceX Academy — ${pair.symbol}`},contents:{en:`${a.signal==="BUY"?"▲":"▼"} ${a.signal} ${a.confidence}%`},url:"https://princex-iq.vercel.app",priority:10},{headers:{Authorization:`Bearer ${ONESIGNAL_API_KEY}`,"Content-Type":"application/json"},timeout:10000});}catch(e){}
       }
     }catch(e){log(`Error ${pair.symbol}: ${e.message}`);}
   }
