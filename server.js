@@ -529,19 +529,119 @@ function getBuyersSellers(closes, rsi, macd, ema9, ema21) {
   return { buyers: Math.round((ab/sum)*100), sellers: Math.round((as2/sum)*100) };
 }
 
-function getNext3(signal, confidence, atr) {
-  const decay = 0.88;
+function calcBollinger(closes, period=20, mult=2) {
+  if (closes.length < period) return null;
+  const slice = closes.slice(0, period);
+  const mean = slice.reduce((a,b)=>a+b,0)/period;
+  const variance = slice.reduce((a,b)=>a+Math.pow(b-mean,2),0)/period;
+  const std = Math.sqrt(variance);
+  return { upper: mean+mult*std, middle: mean, lower: mean-mult*std, std, bandwidth: (2*mult*std)/mean };
+}
+
+function calcStochastic(closes, highs, lows, period=14) {
+  if (closes.length < period) return null;
+  const hh = Math.max(...highs.slice(0, period));
+  const ll = Math.min(...lows.slice(0, period));
+  const k = ((closes[0]-ll)/(hh-ll+0.00001))*100;
+  const prevK = closes.length > period+2 ? ((closes[1]-Math.min(...lows.slice(1,period+1)))/(Math.max(...highs.slice(1,period+1))-Math.min(...lows.slice(1,period+1))+0.00001))*100 : k;
+  return { k: Math.round(k), d: Math.round((k+prevK)/2) };
+}
+
+function calcWilliamsR(closes, highs, lows, period=14) {
+  if (closes.length < period) return null;
+  const hh = Math.max(...highs.slice(0, period));
+  const ll = Math.min(...lows.slice(0, period));
+  return ((hh-closes[0])/(hh-ll+0.00001))*-100;
+}
+
+function calcCCI(closes, highs, lows, period=14) {
+  if (closes.length < period) return null;
+  const tps = closes.slice(0,period).map((_,i)=>(highs[i]+lows[i]+closes[i])/3);
+  const mean = tps.reduce((a,b)=>a+b,0)/period;
+  const mad = tps.reduce((a,b)=>a+Math.abs(b-mean),0)/period;
+  return (tps[0]-mean)/(0.015*(mad||0.00001));
+}
+
+function getNext3(signal, confidence, candles, indicators) {
+  // Predict next 3 candles based on multiple real technical factors
+  const closes = candles.map(c=>parseFloat(c.close));
+  const highs = candles.map(c=>parseFloat(c.high));
+  const lows = candles.map(c=>parseFloat(c.low));
+  const latest = closes[0];
+  const atr = calcATR(highs,lows,closes,14) || 0.0001;
+  
+  // Trend strength from ADX-like calculation
+  const mom5 = ((closes[0]-closes[5])/closes[5])*100;
+  const mom3 = ((closes[0]-closes[3])/closes[3])*100;
+  const mom1 = ((closes[0]-closes[1])/closes[1])*100;
+  
+  // Bollinger band position
+  const bb = calcBollinger(closes, 20, 2);
+  const bbPos = bb ? (latest - bb.lower)/(bb.upper - bb.lower + 0.00001) : 0.5; // 0=lower, 1=upper
+  
+  // RSI from indicators
+  const rsi = calcRSI(closes, 14) || 50;
+  
+  // Stochastic
+  const stoch = calcStochastic(closes, highs, lows, 14);
+  const stochK = stoch ? stoch.k : 50;
+  
+  // Momentum direction confidence per candle
+  const isBull = signal === "BUY";
+  const isBear = signal === "SELL";
+  
   const result = [];
   for (let i = 1; i <= 3; i++) {
-    const conf = Math.round(confidence * Math.pow(decay, i - 1));
-    let dir = "UP";
-    if (signal === "SELL") dir = "DOWN";
-    else if (signal === "WAIT") dir = i % 2 === 0 ? "DOWN" : "UP";
-    const str = conf >= 82 ? "STRONG" : conf >= 70 ? "MEDIUM" : "WEAK";
-    let reason = "Momentum continuation";
-    if (i === 2) reason = "Trend holding with " + str.toLowerCase() + " pressure";
-    if (i === 3) reason = "Final candle - watch for reversal";
-    result.push({ number: i, direction: dir, strength: str, confidence: conf, reason });
+    // Base from overall signal confidence
+    let baseConf = confidence;
+    
+    // Candle 1: strongest signal - momentum just started
+    // Candle 2: continuation - depends on how extended we are
+    // Candle 3: weakest - exhaustion risk
+    
+    let extensionPenalty = 0;
+    let reasons = [];
+    
+    if (isBull) {
+      // Overbought reduces confidence of continuation
+      if (rsi > 75) { extensionPenalty += 12; reasons.push("RSI overbought"); }
+      else if (rsi > 65) { extensionPenalty += 5; reasons.push("RSI elevated"); }
+      if (stochK > 85) { extensionPenalty += 8; reasons.push("Stoch overbought"); }
+      if (bb && latest > bb.upper * 0.998) { extensionPenalty += 10; reasons.push("Near BB upper"); }
+      if (bbPos > 0.85) { extensionPenalty += 8; }
+      // Strong momentum boosts confidence
+      if (mom1 > 0 && mom3 > 0 && mom5 > 0) { extensionPenalty -= 5; reasons.push("All momentum aligned"); }
+    } else if (isBear) {
+      if (rsi < 25) { extensionPenalty += 12; reasons.push("RSI oversold"); }
+      else if (rsi < 35) { extensionPenalty += 5; reasons.push("RSI low"); }
+      if (stochK < 15) { extensionPenalty += 8; reasons.push("Stoch oversold"); }
+      if (bb && latest < bb.lower * 1.002) { extensionPenalty += 10; reasons.push("Near BB lower"); }
+      if (bbPos < 0.15) { extensionPenalty += 8; }
+      if (mom1 < 0 && mom3 < 0 && mom5 < 0) { extensionPenalty -= 5; reasons.push("All momentum aligned"); }
+    }
+    
+    // Each candle further out has more uncertainty
+    const candlePenalty = (i-1) * 7;
+    
+    let candleConf = Math.max(45, Math.min(95, baseConf - extensionPenalty - candlePenalty));
+    
+    const dir = signal === "BUY" ? "UP" : signal === "SELL" ? "DOWN" : i%2===0?"DOWN":"UP";
+    const str = candleConf >= 82 ? "STRONG" : candleConf >= 68 ? "MEDIUM" : "WEAK";
+    
+    let reason = "";
+    if (i === 1) {
+      reason = reasons.length > 0 
+        ? (isBull?"Bullish momentum — watch ":"Bearish momentum — watch ") + reasons[0]
+        : (isBull?"Strong bullish momentum continuation":"Strong bearish momentum continuation");
+    } else if (i === 2) {
+      reason = extensionPenalty > 10 
+        ? "Momentum may slow — " + (isBull?"overbought risk":"oversold risk")
+        : "Trend continuation expected";
+    } else {
+      reason = "Reversal risk increases — exit before this candle if profit secured";
+    }
+    
+    result.push({ number:i, direction:dir, strength:str, confidence:Math.round(candleConf), reason });
   }
   return result;
 }
