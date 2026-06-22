@@ -774,7 +774,7 @@ async function analyzePO(pair) {
     else if (bearScore >= 75) { signal = "SELL"; confidence = bearScore; }
 
     const { buyers, sellers } = getBuyersSellers(closes, rsi, macd, ema9, ema21);
-    const next3 = getNext3(signal, confidence, atr);
+    const next3 = getNext3(signal, confidence, candles, inds);
 
     const swingH = Math.max(...highs.slice(0,5));
     const swingL = Math.min(...lows.slice(0,5));
