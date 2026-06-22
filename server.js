@@ -863,45 +863,32 @@ app.get("/po/get/:symbol", async (req, res) => {
   const symbol = decodeURIComponent(req.params.symbol);
   log("⚡ PO GET: " + symbol);
   const pair = PO_PAIRS.find(p => p.symbol === symbol) || { symbol, flag:"📊", type:"forex" };
+
+  // Serve from cache if fresh (less than 90 seconds old)
+  const cached = poSignals[symbol];
+  if (cached && cached.timestamp) {
+    const age = Date.now() - new Date(cached.timestamp).getTime();
+    if (age < 90000) {
+      log("✅ Cache hit for " + symbol + " (age: " + Math.round(age/1000) + "s)");
+      return res.json({ ...cached, fromCache: true, cacheAge: Math.round(age/1000) });
+    }
+  }
+
+  // Cache miss or stale - fetch fresh
   try {
-    // Use direct axios call - bypass rate limiter queue for instant response
-    const url = "https://api.twelvedata.com/time_series?symbol=" + encodeURIComponent(symbol) + "&interval=1min&outputsize=60&apikey=" + TWELVE_KEY;
-    const directRes = await axios.get(url, { timeout: 15000 });
-    if (!directRes.data || directRes.data.status === "error") {
-      log("Direct fetch error: " + JSON.stringify(directRes.data));
-      // Try from cache if available
-      if (poSignals[symbol]) {
-        log("Serving from cache: " + symbol);
-        return res.json(poSignals[symbol]);
-      }
-      return res.json({ error: "No data for " + symbol + ". " + (directRes.data?.message || "Market may be closed.") });
-    }
-    const candles = directRes.data.values;
-    if (!candles || candles.length < 10) {
-      // Serve from cache if available
-      if (poSignals[symbol]) {
-        log("Serving from cache (no candles): " + symbol);
-        return res.json(poSignals[symbol]);
-      }
-      return res.json({ error: "No candle data for " + symbol });
-    }
-    // Run analysis directly with fresh candles
     const result = await analyzePO(pair);
     if (!result) {
-      // Fallback to cache
-      if (poSignals[symbol]) return res.json(poSignals[symbol]);
-      return res.json({ error: "Analysis failed for " + symbol });
+      if (cached) {
+        log("Analysis failed, serving stale cache for " + symbol);
+        return res.json({ ...cached, fromCache: true, stale: true });
+      }
+      return res.json({ error: "No data for " + symbol + ". Market may be closed or rate limited." });
     }
-    // Update cache
     poSignals[symbol] = result;
     res.json(result);
   } catch(e) {
     log("PO GET error: " + e.message);
-    // Fallback to cache
-    if (poSignals[symbol]) {
-      log("Serving from cache after error: " + symbol);
-      return res.json(poSignals[symbol]);
-    }
+    if (cached) return res.json({ ...cached, fromCache: true, stale: true });
     res.json({ error: e.message });
   }
 });
