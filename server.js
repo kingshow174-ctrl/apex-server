@@ -412,8 +412,11 @@ async function rateLimitedFetch(url) {
 async function fetchCandles(symbol,interval){
   try{
     const res=await rateLimitedFetch(`https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=60&apikey=${TWELVE_KEY}`);
+    if(!res || !res.data) return null;
     if(res.data.status==="error"){log(`TD Error ${symbol}: ${res.data.message}`);return null;}
-    return res.data.values||null;
+    const values = res.data.values;
+    if(!values || !Array.isArray(values)) return null;
+    return values;
   }catch(e){log(`Fetch error: ${e.message}`);return null;}
 }
 
@@ -672,8 +675,8 @@ async function analyzePO(pair) {
   try {
     log("Fetching candles for " + pair.symbol);
     const candles = await fetchCandles(pair.symbol, "1min");
-    if (!candles || candles.length < 30) {
-      log("No candles for " + pair.symbol + ": got " + (candles ? candles.length : 0));
+    if (!candles || !Array.isArray(candles) || candles.length < 10) {
+      log("No candles for " + pair.symbol + ": got " + (candles ? (Array.isArray(candles) ? candles.length : "not array: "+typeof candles) : 0));
       return null;
     }
     log("Got " + candles.length + " candles for " + pair.symbol);
