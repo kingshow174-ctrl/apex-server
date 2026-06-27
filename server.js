@@ -897,3 +897,372 @@ app.get("/po/get/:symbol", async (req, res) => {
 cron.schedule("*/30 * * * *", () => { runPOAnalysis(); });
 setTimeout(runPOAnalysis, 30000);
 // force redeploy Tue Jun 23 02:21:09 EAT 2026
+
+// ============ EXNESS SIGNALS ENGINE ============
+const EXNESS_PAIRS = [
+  "EUR/USD","GBP/USD","USD/JPY","USD/CHF","USD/CAD",
+  "AUD/USD","NZD/USD","EUR/GBP","EUR/JPY","EUR/CHF",
+  "EUR/CAD","EUR/AUD","GBP/JPY","GBP/CHF","GBP/CAD",
+  "GBP/AUD","AUD/JPY","AUD/CAD","AUD/CHF","AUD/NZD",
+  "CAD/JPY","CAD/CHF","CHF/JPY","NZD/JPY","NZD/CAD",
+  "NZD/CHF","XAU/USD",
+];
+
+let exnessSignals = {};
+let exnessLastUpdated = null;
+let exnessAnalyzing = false;
+
+function getSession() {
+  const h = new Date().getUTCHours();
+  if (h >= 0  && h < 7)  return { name:"Tokyo",    icon:"🗼", valid:true  };
+  if (h >= 7  && h < 12) return { name:"London",   icon:"🇬🇧", valid:true  };
+  if (h >= 12 && h < 20) return { name:"New York",  icon:"🗽", valid:true  };
+  return { name:"Off-Hours", icon:"🌙", valid:false };
+}
+
+function calcEMA3(data, period) {
+  if (!data || data.length < period) return null;
+  const k = 2/(period+1);
+  let ema = data.slice(0,period).reduce((a,b)=>a+b,0)/period;
+  for (let i=period-1; i>=0; i--) ema = data[i]*k + ema*(1-k);
+  return ema;
+}
+
+function calcAlligator(closes, highs, lows) {
+  // Bill Williams Alligator: Jaw(13,8), Teeth(8,5), Lips(5,3)
+  if (closes.length < 15) return null;
+  const jaw   = calcSMA(closes.slice(8),  13);
+  const teeth = calcSMA(closes.slice(5),  8);
+  const lips  = calcSMA(closes.slice(3),  5);
+  if (!jaw||!teeth||!lips) return null;
+  const spread = Math.abs(lips-jaw);
+  const sleeping = spread < (Math.abs(closes[0])*0.0002);
+  const bullish = lips>teeth && teeth>jaw;
+  const bearish = lips<teeth && teeth<jaw;
+  return { jaw, teeth, lips, bullish, bearish, sleeping, awake:!sleeping&&(bullish||bearish) };
+}
+
+function calcSMC(closes, highs, lows) {
+  // Simplified SMC: BOS, CHoCH, OB, FVG, Premium/Discount
+  if (closes.length < 10) return { bos:false, choch:false, ob:false, fvg:false, zone:"neutral", score:0 };
+  const latest = closes[0];
+  const prev5H = Math.max(...highs.slice(1,6));
+  const prev5L = Math.min(...lows.slice(1,6));
+  const range = prev5H - prev5L;
+  const midpoint = prev5L + range*0.5;
+  
+  // BOS — price broke recent high/low
+  const bos = latest > prev5H || latest < prev5L;
+  const bosDir = latest > prev5H ? "bull" : "bear";
+  
+  // CHoCH — previous trend reversed
+  const prev10H = Math.max(...highs.slice(1,11));
+  const prev10L = Math.min(...lows.slice(1,11));
+  const choch = (closes[3] > closes[6] && closes[0] < closes[3]) ||
+                (closes[3] < closes[6] && closes[0] > closes[3]);
+
+  // Order Block — last opposing candle before move
+  const ob = Math.abs(parseFloat(closes[2]) - parseFloat(closes[3])) > 
+             Math.abs(parseFloat(closes[0]) - parseFloat(closes[1]));
+
+  // FVG — gap between candles
+  const fvg = lows[0] > highs[2] || highs[0] < lows[2];
+
+  // Premium/Discount zone
+  const zone = latest > midpoint ? "premium" : "discount";
+
+  let score = 0;
+  if (bos) score++;
+  if (choch) score++;
+  if (ob) score++;
+  if (fvg) score++;
+
+  return { bos, bosDir, choch, ob, fvg, zone, score: Math.min(score, 3) };
+}
+
+function calcAlgoAlpha(closes, period=20) {
+  // Simplified AlgoAlpha cloud — based on ATR bands around EMA
+  if (closes.length < period+5) return null;
+  const ema = calcEMA3(closes, period);
+  if (!ema) return null;
+  const atr = calcATR(closes.map((_,i)=>closes[i]), closes.map((_,i)=>closes[i]*0.999), closes, 14);
+  if (!atr) return null;
+  const upper = ema + atr*1.5;
+  const lower = ema - atr*1.5;
+  const latest = closes[0];
+  const aboveCloud = latest > upper;
+  const belowCloud = latest < lower;
+  const inCloud = !aboveCloud && !belowCloud;
+  return { upper, lower, ema, aboveCloud, belowCloud, inCloud, bullish: aboveCloud, bearish: belowCloud };
+}
+
+function calcADX3(highs, lows, closes, period=14) {
+  if (closes.length < period*2) return null;
+  const trs=[], dmP=[], dmM=[];
+  for (let i=0;i<period;i++) {
+    trs.push(Math.max(highs[i]-lows[i],Math.abs(highs[i]-closes[i+1]),Math.abs(lows[i]-closes[i+1])));
+    const dp=highs[i]-highs[i+1], dm=lows[i+1]-lows[i];
+    dmP.push(dp>dm&&dp>0?dp:0);
+    dmM.push(dm>dp&&dm>0?dm:0);
+  }
+  const atr2=trs.reduce((a,b)=>a+b,0)/period;
+  const diP=(dmP.reduce((a,b)=>a+b,0)/period)/atr2*100;
+  const diM=(dmM.reduce((a,b)=>a+b,0)/period)/atr2*100;
+  const adx=Math.abs(diP-diM)/(diP+diM+0.001)*100;
+  return { adx, diPlus:diP, diMinus:diM, strong:adx>25 };
+}
+
+function calcVolumeSpike(volumes, period=20) {
+  if (!volumes||volumes.length<period) return false;
+  const avg = volumes.slice(1,period+1).reduce((a,b)=>a+b,0)/period;
+  return volumes[0] > avg * 1.5;
+}
+
+async function analyzeExness(symbol) {
+  try {
+    const candles = await fetchCandles(symbol, "1h");
+    if (!candles||!Array.isArray(candles)||candles.length<30) return null;
+
+    const closes  = candles.map(c=>parseFloat(c.close));
+    const highs   = candles.map(c=>parseFloat(c.high));
+    const lows    = candles.map(c=>parseFloat(c.low));
+    const volumes = candles.map(c=>parseFloat(c.volume)||1);
+    const latest  = closes[0];
+
+    // All indicators
+    const ema20  = calcEMA3(closes, 20);
+    const ema50  = calcEMA3(closes, 50);
+    const ema200 = calcEMA3(closes, 200);
+    const rsi    = calcRSI(closes, 14);
+    const macd   = calcMACD(closes);
+    const atr    = calcATR(highs, lows, closes, 10);
+    const adx    = calcADX3(highs, lows, closes, 14);
+    const alligator = calcAlligator(closes, highs, lows);
+    const smc    = calcSMC(closes, highs, lows);
+    const algo   = calcAlgoAlpha(closes, 20);
+    const volSpike = calcVolumeSpike(volumes, 20);
+    const session = getSession();
+
+    // VWAP
+    let cumTPV=0, cumVol=0;
+    for (let i=0;i<Math.min(20,closes.length);i++) {
+      const tp=(highs[i]+lows[i]+closes[i])/3;
+      cumTPV+=tp*(volumes[i]||1); cumVol+=(volumes[i]||1);
+    }
+    const vwap = cumVol>0 ? cumTPV/cumVol : null;
+
+    // Supertrend
+    const stMult = 3;
+    const stLower = atr ? ((highs[0]+lows[0])/2) - stMult*atr : null;
+    const stUpper = atr ? ((highs[0]+lows[0])/2) + stMult*atr : null;
+    const supertrendBull = stLower ? closes[0] > stLower : null;
+
+    // Candlestick pattern
+    const pat = getPattern(candles);
+
+    // =====================
+    // CONFLUENCE SCORING
+    // =====================
+    let bullScore = 0, bearScore = 0;
+    const details = {};
+
+    // 1. EMA Alignment
+    if (ema20&&ema50&&ema200) {
+      if (ema20>ema50&&ema50>ema200) { bullScore++; details.ema={bull:true,label:"EMA Aligned Bullish"}; }
+      else if (ema20<ema50&&ema50<ema200) { bearScore++; details.ema={bear:true,label:"EMA Aligned Bearish"}; }
+      else details.ema={neutral:true,label:"EMA Mixed"};
+    }
+
+    // 2. Supertrend
+    if (supertrendBull!==null) {
+      if (supertrendBull) { bullScore++; details.supertrend={bull:true,label:"Above Supertrend"}; }
+      else { bearScore++; details.supertrend={bear:true,label:"Below Supertrend"}; }
+    }
+
+    // 3. VWAP
+    if (vwap) {
+      if (latest>vwap) { bullScore++; details.vwap={bull:true,label:"Above VWAP"}; }
+      else { bearScore++; details.vwap={bear:true,label:"Below VWAP"}; }
+    }
+
+    // 4. SMC (max 3 points)
+    if (smc.score > 0) {
+      const smcDir = smc.zone==="discount" ? "bull" : "bear";
+      if (smcDir==="bull") { bullScore += Math.min(smc.score,3); }
+      else { bearScore += Math.min(smc.score,3); }
+      details.smc = { label:`BOS:${smc.bos?'✓':'✗'} CHoCH:${smc.choch?'✓':'✗'} OB:${smc.ob?'✓':'✗'} FVG:${smc.fvg?'✓':'✗'}`, zone:smc.zone };
+    }
+
+    // 5. AlgoAlpha
+    if (algo) {
+      if (algo.bullish) { bullScore++; details.algo={bull:true,label:"Above AlgoAlpha Cloud"}; }
+      else if (algo.bearish) { bearScore++; details.algo={bear:true,label:"Below AlgoAlpha Cloud"}; }
+      else details.algo={neutral:true,label:"Inside Cloud — Weak"};
+    }
+
+    // 6. RSI
+    if (rsi!==null) {
+      if (rsi>55) { bullScore++; details.rsi={bull:true,label:`RSI ${rsi.toFixed(1)} Bullish`}; }
+      else if (rsi<45) { bearScore++; details.rsi={bear:true,label:`RSI ${rsi.toFixed(1)} Bearish`}; }
+      else details.rsi={neutral:true,label:`RSI ${rsi.toFixed(1)} Neutral`};
+    }
+
+    // 7. MACD
+    if (macd) {
+      if (macd.histogram>0) { bullScore++; details.macd={bull:true,label:"MACD Bullish"}; }
+      else { bearScore++; details.macd={bear:true,label:"MACD Bearish"}; }
+    }
+
+    // 8. Alligator
+    if (alligator) {
+      if (alligator.sleeping) { details.alligator={neutral:true,label:"Alligator Sleeping — No Signal"}; }
+      else if (alligator.bullish) { bullScore++; details.alligator={bull:true,label:"Alligator Awake Bullish"}; }
+      else if (alligator.bearish) { bearScore++; details.alligator={bear:true,label:"Alligator Awake Bearish"}; }
+    }
+
+    // 9. Volume
+    if (volSpike) {
+      const volDir = closes[0]>closes[1]?"bull":"bear";
+      if (volDir==="bull") { bullScore++; details.volume={bull:true,label:"Volume Spike Bullish"}; }
+      else { bearScore++; details.volume={bear:true,label:"Volume Spike Bearish"}; }
+    } else details.volume={neutral:true,label:"Normal Volume"};
+
+    // 10. Candlestick
+    if (pat.bias!==0) {
+      if (pat.bias>0) { bullScore++; details.pattern={bull:true,label:pat.name+" Bullish"}; }
+      else { bearScore++; details.pattern={bear:true,label:pat.name+" Bearish"}; }
+    }
+
+    // 11. ADX Sniper bias
+    if (adx) {
+      const sniperDir = bullScore>bearScore?"bull":"bear";
+      if (adx.strong) {
+        if (sniperDir==="bull") { bullScore++; details.sniper={bull:true,label:`ADX ${adx.adx.toFixed(1)} Strong Bull`}; }
+        else { bearScore++; details.sniper={bear:true,label:`ADX ${adx.adx.toFixed(1)} Strong Bear`}; }
+      } else details.sniper={neutral:true,label:`ADX ${adx.adx.toFixed(1)} Weak Trend`};
+    }
+
+    const totalScore = bullScore + bearScore;
+    const maxScore = 14;
+    const dominant = bullScore >= bearScore ? "BUY" : "SELL";
+    const domScore = dominant==="BUY" ? bullScore : bearScore;
+
+    // Session threshold
+    const minScore = session.name==="Tokyo" ? 9 : 8;
+
+    // Confidence tier
+    let signal = "WAIT", tier = "weak", tierIcon = "🔴";
+    if (domScore >= 11) { signal=dominant; tier="elite"; tierIcon="💎"; }
+    else if (domScore >= 8) { signal=dominant; tier="strong"; tierIcon="🟢"; }
+    else if (domScore >= 6) { tier="moderate"; tierIcon="🟡"; signal="WAIT"; }
+
+    // Apply session filter
+    if (domScore < minScore) signal = "WAIT";
+
+    // Market bias label
+    const bullPct = Math.round((bullScore/Math.max(totalScore,1))*100);
+    const bearPct = 100-bullPct;
+    let marketBias = "NEUTRAL";
+    if (bullPct>=75) marketBias="STRONG BULL";
+    else if (bullPct>=60) marketBias="BULL";
+    else if (bearPct>=75) marketBias="STRONG BEAR";
+    else if (bearPct>=60) marketBias="BEAR";
+
+    // Entry & Exit levels
+    if (!atr) return null;
+    const swingH = Math.max(...highs.slice(0,5));
+    const swingL = Math.min(...lows.slice(0,5));
+    let sl, tp1, tp2, tp3;
+    if (signal==="BUY") {
+      sl  = Math.min(swingL, latest - atr*1.5);
+      tp1 = latest + atr*2;
+      tp2 = latest + atr*3.5;
+      tp3 = latest + atr*5;
+    } else if (signal==="SELL") {
+      sl  = Math.max(swingH, latest + atr*1.5);
+      tp1 = latest - atr*2;
+      tp2 = latest - atr*3.5;
+      tp3 = latest - atr*5;
+    } else {
+      sl=latest-atr*1.5; tp1=latest+atr*2; tp2=latest+atr*3.5; tp3=latest+atr*5;
+    }
+
+    const rr1 = Math.abs((tp1-latest)/(latest-sl+0.00001)).toFixed(1);
+    const rr2 = Math.abs((tp2-latest)/(latest-sl+0.00001)).toFixed(1);
+    const rr3 = Math.abs((tp3-latest)/(latest-sl+0.00001)).toFixed(1);
+    const pips = (Math.abs(tp2-latest)*10000).toFixed(0);
+
+    return {
+      symbol, timeframe:"1H", signal, tier, tierIcon,
+      score: domScore, maxScore, bullScore, bearScore,
+      bullPct, bearPct, marketBias,
+      price: latest.toFixed(5), entry: latest.toFixed(5),
+      sl: sl.toFixed(5), tp1: tp1.toFixed(5), tp2: tp2.toFixed(5), tp3: tp3.toFixed(5),
+      rr1, rr2, rr3, pips,
+      session, atr: atr.toFixed(5),
+      rsi: rsi?.toFixed(1), adx: adx?.adx.toFixed(1),
+      vwap: vwap?.toFixed(5),
+      smcZone: smc.zone, smcDetails: details.smc?.label,
+      alligatorStatus: alligator?.sleeping?"Sleeping":alligator?.bullish?"Awake Bullish":alligator?.bearish?"Awake Bearish":"Unknown",
+      algoStatus: algo?.bullish?"Above Cloud":algo?.bearish?"Below Cloud":"Inside Cloud",
+      indicators: details,
+      timestamp: new Date().toISOString(),
+    };
+  } catch(e) {
+    log("Exness error "+symbol+": "+e.message);
+    return null;
+  }
+}
+
+async function runExnessAnalysis() {
+  if (exnessAnalyzing) return;
+  exnessAnalyzing = true;
+  log("📊 Exness Analysis started");
+  for (const symbol of EXNESS_PAIRS) {
+    try {
+      await wait(20000);
+      const result = await analyzeExness(symbol);
+      if (result) {
+        exnessSignals[symbol] = result;
+        log("✅ Exness "+symbol+": "+result.signal+" "+result.score+"/14 "+result.tierIcon);
+      }
+    } catch(e) { log("Exness loop error "+symbol+": "+e.message); }
+  }
+  exnessLastUpdated = new Date().toISOString();
+  exnessAnalyzing = false;
+  log("✅ Exness done. "+Object.keys(exnessSignals).length+" pairs");
+}
+
+app.get("/exness/signals", (req,res) => {
+  res.json({ signals:exnessSignals, lastUpdated:exnessLastUpdated, isAnalyzing:exnessAnalyzing });
+});
+
+app.get("/exness/trigger", (req,res) => {
+  runExnessAnalysis();
+  res.json({ message:"Exness scan triggered" });
+});
+
+app.get("/exness/get/:symbol", async (req,res) => {
+  const symbol = decodeURIComponent(req.params.symbol);
+  log("⚡ Exness GET: "+symbol);
+  const cached = exnessSignals[symbol];
+  if (cached && cached.timestamp) {
+    const age = Date.now()-new Date(cached.timestamp).getTime();
+    if (age < 90000) return res.json({ ...cached, fromCache:true });
+  }
+  try {
+    const result = await analyzeExness(symbol);
+    if (!result) {
+      if (cached) return res.json({ ...cached, fromCache:true, stale:true });
+      return res.json({ error:"No data for "+symbol });
+    }
+    exnessSignals[symbol] = result;
+    res.json(result);
+  } catch(e) {
+    if (cached) return res.json({ ...cached, fromCache:true, stale:true });
+    res.json({ error:e.message });
+  }
+});
+
+cron.schedule("*/30 * * * *", () => { runExnessAnalysis(); });
+setTimeout(runExnessAnalysis, 600000); // start 10 min after boot
