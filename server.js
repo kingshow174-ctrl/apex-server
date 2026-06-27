@@ -1018,9 +1018,9 @@ function calcVolumeSpike(volumes, period=20) {
   return volumes[0] > avg * 1.5;
 }
 
-async function analyzeExness(symbol) {
+async function analyzeExness(symbol, tf="1h") {
   try {
-    const candles = await fetchCandles(symbol, "1h");
+    const candles = await fetchCandles(symbol, tf);
     if (!candles||!Array.isArray(candles)||candles.length<30) return null;
 
     const closes  = candles.map(c=>parseFloat(c.close));
@@ -1193,7 +1193,7 @@ async function analyzeExness(symbol) {
     const pips = (Math.abs(tp2-latest)*10000).toFixed(0);
 
     return {
-      symbol, timeframe:"1H", signal, tier, tierIcon,
+      symbol, timeframe:tf.toUpperCase(), signal, tier, tierIcon,
       score: domScore, maxScore, bullScore, bearScore,
       bullPct, bearPct, marketBias,
       price: latest.toFixed(5), entry: latest.toFixed(5),
@@ -1244,8 +1244,10 @@ app.get("/exness/trigger", (req,res) => {
 
 app.get("/exness/get/:symbol", async (req,res) => {
   const symbol = decodeURIComponent(req.params.symbol);
-  log("⚡ Exness GET: "+symbol);
-  const cached = exnessSignals[symbol];
+  const tf = req.query.tf || "1h";
+  log("⚡ Exness GET: "+symbol+" TF:"+tf);
+  const cacheKey = symbol+"_"+tf;
+  const cached = exnessSignals[cacheKey] || exnessSignals[symbol];
   if (cached && cached.timestamp) {
     const age = Date.now()-new Date(cached.timestamp).getTime();
     if (age < 90000) return res.json({ ...cached, fromCache:true });
