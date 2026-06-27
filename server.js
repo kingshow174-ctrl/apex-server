@@ -1221,7 +1221,7 @@ async function runExnessAnalysis() {
   for (const symbol of EXNESS_PAIRS) {
     try {
       await wait(20000);
-      const result = await analyzeExness(symbol);
+      const result = await analyzeExness(symbol, tf);
       if (result) {
         exnessSignals[symbol] = result;
         log("✅ Exness "+symbol+": "+result.signal+" "+result.score+"/14 "+result.tierIcon);
@@ -1253,7 +1253,7 @@ app.get("/exness/get/:symbol", async (req,res) => {
     if (age < 90000) return res.json({ ...cached, fromCache:true });
   }
   try {
-    const result = await analyzeExness(symbol);
+    const result = await analyzeExness(symbol, tf);
     if (!result) {
       if (cached) return res.json({ ...cached, fromCache:true, stale:true });
       return res.json({ error:"No data for "+symbol });
