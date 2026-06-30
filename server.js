@@ -114,13 +114,13 @@ async function stkPush(phone, amount, orderId, planName) {
     BusinessShortCode: DARAJA_TILL,
     Password:          pwd,
     Timestamp:         ts,
-    TransactionType:   "CustomerBuyGoodsOnline",
+    TransactionType:   "CustomerPayBillOnline",
     Amount:            Math.ceil(amount),
     PartyA:            p,
     PartyB:            DARAJA_TILL,
     PhoneNumber:       p,
     CallBackURL:       DARAJA_CALLBACK_URL,
-    AccountReference:  orderId.slice(0, 12),
+    AccountReference:  "PRINCEXIQ",  // Paybill account number
     TransactionDesc:   `PrinceX IQ ${planName}`,
   };
 
