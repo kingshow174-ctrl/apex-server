@@ -26,20 +26,20 @@ const ONESIGNAL_APP_ID = "9b174534-5638-46d0-9efb-071db011b02c";
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY || "os_v2_app_tmlukncwhbdnbhx3a4o3aenqft7oc4a2664uo5nv3expvl2rh7arc4u3iwg5een2ybhtoxqvdslrb5zncgrhu4fzjrdt7lljm2ojtcq";
 
 // ============ DARAJA CONFIG ============
-const IS_SANDBOX = process.env.DARAJA_SANDBOX !== "false"; // default sandbox
+const IS_SANDBOX = process.env.DARAJA_SANDBOX === "true"; // default PRODUCTION
 const DARAJA_BASE = IS_SANDBOX
   ? "https://sandbox.safaricom.co.ke"
   : "https://api.safaricom.co.ke";
 
-const DARAJA_CONSUMER_KEY    = process.env.DARAJA_CONSUMER_KEY    || "6D8ASAUllnUXgEcFKxtKRtL8TaHgZLtZq0k5Aih013uecVW0";
-const DARAJA_CONSUMER_SECRET = process.env.DARAJA_CONSUMER_SECRET || "JYCGuVblUvlLXaF0U55Lg0A9yYAhNBbpGlG051Y2xaR4ejL4QveBteXGO79wVlnM";
-const DARAJA_PASSKEY         = process.env.DARAJA_PASSKEY         || "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919";
+const DARAJA_CONSUMER_KEY    = process.env.DARAJA_CONSUMER_KEY    || "FM8HJau9e8Yq6sdNIAIRBBPWIDGWcYBBWAVxbZ1h7KPAXv41";
+const DARAJA_CONSUMER_SECRET = process.env.DARAJA_CONSUMER_SECRET || "oDFILVTaHGOtj0EuFOdwkqQ4F5HneSMVPmNOqIw4zE8xO5OseS95Hbfg8UqXQ4v7";
+const DARAJA_PASSKEY         = process.env.DARAJA_PASSKEY         || "c6c7bf7c29175e348be51d50851854c32658a8deacc6b71e757e1b4bcdefa0df";
 const DARAJA_CALLBACK_URL    = "https://apex-server-09p7.onrender.com/mpesa/callback";
 
 // Till: sandbox uses 174379, production uses your real till
 const DARAJA_TILL = IS_SANDBOX
   ? (process.env.DARAJA_SANDBOX_TILL || "174379")
-  : (process.env.DARAJA_TILL || "9352134");
+  : (process.env.DARAJA_TILL || "4325093");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
