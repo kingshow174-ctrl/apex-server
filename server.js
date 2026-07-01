@@ -44,10 +44,10 @@ const DARAJA_TILL = IS_SANDBOX
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 const PLANS = {
-  weekly:   { name:"Weekly",   price:299,   days:7    },
-  monthly:  { name:"Monthly",  price:799,   days:30   },
-  annual:   { name:"Annual",   price:6999,  days:365  },
-  lifetime: { name:"Lifetime", price:14999, days:null },
+  weekly:   { name:"Weekly",   price:499,   days:7    },
+  monthly:  { name:"Monthly",  price:1499,   days:30   },
+  annual:   { name:"Annual",   price:9999,  days:365  },
+  lifetime: { name:"Lifetime", price:19999, days:null },
 };
 
 let logs = [];
