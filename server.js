@@ -1268,3 +1268,154 @@ app.get("/exness/get/:symbol", async (req,res) => {
 
 cron.schedule("*/30 * * * *", () => { runExnessAnalysis(); });
 setTimeout(runExnessAnalysis, 600000); // start 10 min after boot
+
+// ============ INFLUENCER/AFFILIATE PROGRAM ============
+const COMMISSIONS = {
+  weekly:  100,
+  monthly: 250,
+  annual:  1200,
+  lifetime: 2000,
+};
+
+// Generate unique referral code
+function generateCode(name) {
+  const clean = name.toUpperCase().replace(/[^A-Z]/g,"").slice(0,4);
+  const rand = Math.random().toString(36).substring(2,6).toUpperCase();
+  return clean + rand;
+}
+
+// Register influencer
+app.post("/influencer/register", async (req, res) => {
+  const { user_id, full_name, mpesa_number, national_id } = req.body;
+  if (!user_id||!full_name||!mpesa_number||!national_id)
+    return res.json({ error:"All fields required" });
+  try {
+    // Check if already registered
+    const { data: existing } = await supabase.from("influencers")
+      .select("*").eq("user_id", user_id).single();
+    if (existing) return res.json({ error:"Already registered", influencer:existing });
+
+    const referral_code = generateCode(full_name);
+    const { data, error } = await supabase.from("influencers").insert({
+      user_id, full_name, mpesa_number, national_id,
+      referral_code, status:"pending"
+    }).select().single();
+
+    if (error) return res.json({ error: error.message });
+    log("✅ Influencer registered: "+full_name+" code:"+referral_code);
+    res.json({ success:true, influencer:data });
+  } catch(e) { res.json({ error:e.message }); }
+});
+
+// Get influencer dashboard data
+app.get("/influencer/:userId", async (req, res) => {
+  try {
+    const { data: inf } = await supabase.from("influencers")
+      .select("*").eq("user_id", req.params.userId).single();
+    if (!inf) return res.json({ registered:false });
+
+    const { data: referrals } = await supabase.from("referrals")
+      .select("*").eq("influencer_id", inf.id).order("created_at", { ascending:false });
+
+    const { data: payouts } = await supabase.from("payouts")
+      .select("*").eq("influencer_id", inf.id).order("created_at", { ascending:false });
+
+    const totalEarned = (referrals||[]).reduce((a,r)=>a+(r.commission||0),0);
+    const totalPaid = (payouts||[]).filter(p=>p.status==="paid").reduce((a,p)=>a+(p.amount||0),0);
+    const balance = totalEarned - totalPaid;
+
+    res.json({ registered:true, influencer:inf, referrals:referrals||[], payouts:payouts||[], totalEarned, totalPaid, balance });
+  } catch(e) { res.json({ error:e.message }); }
+});
+
+// Request payout
+app.post("/influencer/payout", async (req, res) => {
+  const { user_id, amount } = req.body;
+  try {
+    const { data: inf } = await supabase.from("influencers")
+      .select("*").eq("user_id", user_id).single();
+    if (!inf) return res.json({ error:"Not registered as influencer" });
+    if (inf.status!=="approved") return res.json({ error:"Account pending approval" });
+
+    // Check balance
+    const { data: referrals } = await supabase.from("referrals").select("commission").eq("influencer_id", inf.id);
+    const { data: payouts } = await supabase.from("payouts").select("amount").eq("influencer_id", inf.id).eq("status","paid");
+    const earned = (referrals||[]).reduce((a,r)=>a+(r.commission||0),0);
+    const paid = (payouts||[]).reduce((a,p)=>a+(p.amount||0),0);
+    const balance = earned - paid;
+
+    if (balance < 1000) return res.json({ error:"Minimum payout is KES 1,000. Your balance: KES "+balance });
+    if (amount > balance) return res.json({ error:"Insufficient balance. Available: KES "+balance });
+
+    const { data } = await supabase.from("payouts").insert({
+      influencer_id: inf.id, amount, mpesa_number: inf.mpesa_number, status:"pending"
+    }).select().single();
+
+    log("💰 Payout requested: "+inf.full_name+" KES"+amount);
+    res.json({ success:true, payout:data });
+  } catch(e) { res.json({ error:e.message }); }
+});
+
+// Track referral on subscription payment
+async function trackReferral(userId, plan) {
+  try {
+    const { data: profile } = await supabase.from("profiles")
+      .select("referred_by").eq("id", userId).single();
+    if (!profile?.referred_by) return;
+
+    const { data: inf } = await supabase.from("influencers")
+      .select("*").eq("referral_code", profile.referred_by).single();
+    if (!inf || inf.status!=="approved") return;
+
+    const commission = COMMISSIONS[plan] || 0;
+    await supabase.from("referrals").insert({
+      influencer_id: inf.id, referred_user_id: userId,
+      plan, commission, status:"pending"
+    });
+
+    await supabase.from("influencers").update({
+      total_earnings: (inf.total_earnings||0) + commission,
+      total_referrals: (inf.total_referrals||0) + 1,
+    }).eq("id", inf.id);
+
+    log("✅ Referral tracked: "+inf.full_name+" +KES"+commission+" ("+plan+")");
+  } catch(e) { log("Referral track error: "+e.message); }
+}
+
+// Admin - get all influencers
+app.get("/admin/influencers", requireAdmin, async (req, res) => {
+  const { data } = await supabase.from("influencers")
+    .select("*, profiles(email)").order("created_at", { ascending:false });
+  res.json({ influencers: data||[] });
+});
+
+// Admin - approve/suspend influencer
+app.post("/admin/influencer/status", requireAdmin, async (req, res) => {
+  const { influencer_id, status } = req.body;
+  await supabase.from("influencers").update({ status }).eq("id", influencer_id);
+  res.json({ success:true });
+});
+
+// Admin - get all payout requests
+app.get("/admin/payouts", requireAdmin, async (req, res) => {
+  const { data } = await supabase.from("payouts")
+    .select("*, influencers(full_name, mpesa_number)").order("created_at", { ascending:false });
+  res.json({ payouts: data||[] });
+});
+
+// Admin - mark payout as paid
+app.post("/admin/payout/pay", requireAdmin, async (req, res) => {
+  const { payout_id } = req.body;
+  await supabase.from("payouts").update({ status:"paid" }).eq("id", payout_id);
+  res.json({ success:true });
+});
+
+// Validate referral code
+app.get("/referral/check/:code", async (req, res) => {
+  try {
+    const { data } = await supabase.from("influencers")
+      .select("full_name, referral_code, status").eq("referral_code", req.params.code.toUpperCase()).single();
+    if (!data || data.status!=="approved") return res.json({ valid:false });
+    res.json({ valid:true, name:data.full_name, code:data.referral_code });
+  } catch(e) { res.json({ valid:false }); }
+});
