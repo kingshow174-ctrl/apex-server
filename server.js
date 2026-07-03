@@ -1419,3 +1419,35 @@ app.get("/referral/check/:code", async (req, res) => {
     res.json({ valid:true, name:data.full_name, code:data.referral_code });
   } catch(e) { res.json({ valid:false }); }
 });
+
+// Verify pending payment for user - manual check
+app.post("/mpesa/verify-pending", async (req, res) => {
+  const { user_id } = req.body;
+  try {
+    // Check if they have a pending payment
+    const { data: payments } = await supabase.from("payments")
+      .select("*").eq("user_id", user_id).eq("status","pending")
+      .order("created_at", { ascending:false }).limit(1);
+
+    if (!payments||payments.length===0) return res.json({ activated:false, message:"No pending payment found" });
+
+    const payment = payments[0];
+
+    // Query Safaricom for status
+    const statusData = await stkQuery(payment.pesapal_tracking_id);
+    const rc = String(statusData.ResultCode??"");
+
+    if (rc==="0") {
+      // Payment successful - activate
+      await supabase.from("payments").update({ status:"completed" }).eq("id", payment.id);
+      await activateSub(user_id, payment.plan);
+      log("✅ Manual verify activated: "+user_id+" "+payment.plan);
+      return res.json({ activated:true, plan:payment.plan });
+    }
+
+    res.json({ activated:false, resultCode:rc, message:statusData.ResultDesc });
+  } catch(e) {
+    log("Verify pending error: "+e.message);
+    res.json({ activated:false, error:e.message });
+  }
+});
