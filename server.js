@@ -1426,10 +1426,16 @@ app.post("/mpesa/verify-pending", async (req, res) => {
   try {
     // Check if they have a pending payment
     const { data: payments } = await supabase.from("payments")
-      .select("*").eq("user_id", user_id).eq("status","pending")
+      .select("*").eq("user_id", user_id).in("status",["pending","completed"])
       .order("created_at", { ascending:false }).limit(1);
 
-    if (!payments||payments.length===0) return res.json({ activated:false, message:"No pending payment found" });
+    if (!payments||payments.length===0) return res.json({ activated:false, message:"No payment found. Make sure you used the same account to pay." });
+    // If already completed just re-activate subscription
+    const completed = payments.find(p=>p.status==="completed");
+    if (completed) {
+      await activateSub(user_id, completed.plan);
+      return res.json({ activated:true, plan:completed.plan, message:"Re-activated from completed payment" });
+    }
 
     const payment = payments[0];
 
