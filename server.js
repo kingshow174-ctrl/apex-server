@@ -401,7 +401,7 @@ let lastApiCall = 0;
 async function rateLimitedFetch(url) {
   const now = Date.now();
   const elapsed = now - lastApiCall;
-  const minGap = 12000; // 12 seconds between calls = max 5/min
+  const minGap = 15000; // 15s = max 4 calls/min, well under free limit // 12 seconds between calls = max 5/min
   if (elapsed < minGap) {
     await wait(minGap - elapsed);
   }
@@ -894,7 +894,7 @@ app.get("/po/get/:symbol", async (req, res) => {
 });
 
 // Run PO every 1 min
-cron.schedule("*/30 * * * *", () => { runPOAnalysis(); });
+cron.schedule("*/45 * * * *", () => { runPOAnalysis(); }); // every 45 min
 setTimeout(runPOAnalysis, 30000);
 // force redeploy Tue Jun 23 02:21:09 EAT 2026
 
@@ -1266,7 +1266,7 @@ app.get("/exness/get/:symbol", async (req,res) => {
   }
 });
 
-cron.schedule("*/30 * * * *", () => { runExnessAnalysis(); });
+cron.schedule("*/60 * * * *", () => { runExnessAnalysis(); }); // every 60 min
 setTimeout(runExnessAnalysis, 600000); // start 10 min after boot
 
 // ============ INFLUENCER/AFFILIATE PROGRAM ============
