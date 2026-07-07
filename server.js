@@ -461,7 +461,7 @@ app.listen(PORT, async () => {
   log(`📱 Till: ${DARAJA_TILL}`);
   try { await getDarajaToken(); log("✅ Daraja ready"); }
   catch(e) { log(`⚠ Daraja token failed: ${e.message}`); }
-  setTimeout(runAnalysis, 15000);
+  // setTimeout(runAnalysis, 15000);
 });
 
 
@@ -894,8 +894,8 @@ app.get("/po/get/:symbol", async (req, res) => {
 });
 
 // Run PO every 1 min
-cron.schedule("*/45 * * * *", () => { runPOAnalysis(); }); // every 45 min
-setTimeout(runPOAnalysis, 30000);
+// PO auto-scan disabled - manual trigger only
+// setTimeout(runPOAnalysis, 30000);
 // force redeploy Tue Jun 23 02:21:09 EAT 2026
 
 // ============ EXNESS SIGNALS ENGINE ============
@@ -1266,8 +1266,8 @@ app.get("/exness/get/:symbol", async (req,res) => {
   }
 });
 
-cron.schedule("*/60 * * * *", () => { runExnessAnalysis(); }); // every 60 min
-setTimeout(runExnessAnalysis, 600000); // start 10 min after boot
+// Exness auto-scan disabled - manual trigger only
+// setTimeout(runExnessAnalysis, 600000); // start 10 min after boot
 
 // ============ INFLUENCER/AFFILIATE PROGRAM ============
 const COMMISSIONS = {
