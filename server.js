@@ -1847,6 +1847,164 @@ async function megaAnalysis(symbol, tf, htfCandles) {
 // HTF map
 const HTF_MAP = { '1min':'5min', '5min':'15min', '15min':'1h', '1h':'4h', '4h':'1day' };
 
+
+async function megaAnalysisFromCandles(symbol, tf, candles, htfCandles) {
+  try {
+    const closes  = candles.map(c => parseFloat(c.close));
+    const highs   = candles.map(c => parseFloat(c.high));
+    const lows    = candles.map(c => parseFloat(c.low));
+    const volumes = candles.map(c => parseFloat(c.volume)||1);
+    const latest  = closes[0];
+
+    const ema20  = calcEMA(closes,20), ema50=calcEMA(closes,50), ema200=calcEMA(closes,200);
+    const hma    = calcHMA(closes,20);
+    const ichi   = calcIchimoku(closes,highs,lows);
+    const psar   = calcParabolicSAR(highs,lows);
+    const bb     = calcBB(closes,20,2);
+    const rsi    = calcRSI(closes,14);
+    const macd   = calcMACD(closes);
+    const stoch  = calcStochastic(highs,lows,closes,14);
+    const srsi   = calcStochasticRSI(closes,14);
+    const cci    = calcCCI(closes,highs,lows,14);
+    const wr     = calcWilliamsR(closes,highs,lows,14);
+    const adx    = calcADX(highs,lows,closes,14);
+    const aroon  = calcAroon(highs,lows,25);
+    const obv    = calcOBV(closes,volumes);
+    const mfi    = calcMFI(closes,highs,lows,volumes,14);
+    const cmf    = calcCMF(closes,highs,lows,volumes,20);
+    const smc    = detectSMC(closes,highs,lows);
+    const pat    = getPattern(candles);
+    const chart  = detectChartPattern(closes,highs,lows);
+    const vwap   = calcBB(closes,20,0);
+
+    let atrSum=0; for(let i=0;i<Math.min(14,highs.length-1);i++) atrSum+=highs[i]-lows[i];
+    const atr=atrSum/Math.min(14,highs.length-1);
+
+    const avgVol=volumes.slice(1,21).reduce((a,b)=>a+b,0)/20;
+    const volSpike=volumes[0]>avgVol*1.5;
+    const bbWidth=bb?(bb.upper-bb.lower)/bb.middle:0;
+    const bbSqueeze=bbWidth<0.01;
+
+    let totalScore=0;
+    const cats={}, bullVotes=[], bearVotes=[];
+
+    const vote=(name,bull,bear,cat)=>{
+      if(!cats[cat]) cats[cat]={bull:0,bear:0,items:[]};
+      if(bull){bullVotes.push(name);cats[cat].bull++;cats[cat].items.push({name,dir:"bull"});}
+      if(bear){bearVotes.push(name);cats[cat].bear++;cats[cat].items.push({name,dir:"bear"});}
+    };
+
+    if(ema20&&ema50&&ema200) vote("EMA",ema20>ema50&&ema50>ema200,ema20<ema50&&ema50<ema200,"trend");
+    if(psar) vote("PSAR",psar.bull,!psar.bull,"trend");
+    if(ichi) vote("Ichimoku",ichi.bull,ichi.bear,"trend");
+    if(hma)  vote("HMA",hma>calcEMA(closes,21),hma<calcEMA(closes,21),"trend");
+    if(ema20) vote("EMA20",latest>ema20,latest<ema20,"trend");
+    const trendScore=Math.min(5,Math.max(cats.trend?.bull||0,cats.trend?.bear||0));
+
+    if(rsi!==null) vote("RSI",rsi>50,rsi<50,"momentum");
+    if(macd) vote("MACD",macd.bullish,!macd.bullish,"momentum");
+    if(stoch) vote("Stoch",stoch.bull,stoch.bear,"momentum");
+    if(srsi) vote("StochRSI",srsi.bull,srsi.bear,"momentum");
+    if(cci!==null) vote("CCI",cci>0,cci<0,"momentum");
+    if(wr!==null) vote("WR",wr>-50,wr<-50,"momentum");
+    const momScore=Math.min(4,Math.max(cats.momentum?.bull||0,cats.momentum?.bear||0));
+
+    if(bb) vote("BB",latest>bb.middle,latest<bb.middle,"volatility");
+    const volScore=Math.min(2,atr>0?1:0);
+
+    if(volSpike) vote("VolSpike",closes[0]>closes[1],closes[0]<closes[1],"volume");
+    if(obv) vote("OBV",obv.bull,!obv.bull,"volume");
+    if(mfi) vote("MFI",mfi.bull,mfi.bear,"volume");
+    if(cmf) vote("CMF",cmf.bull,!cmf.bull,"volume");
+    if(vwap) vote("VWAP",latest>vwap.middle,latest<vwap.middle,"volume");
+    const volumeScore=Math.min(3,Math.max(cats.volume?.bull||0,cats.volume?.bear||0));
+
+    const smcScore=Math.min(5,smc.score);
+    const candleScore=pat.bias!==0?1:0;
+    const chartScore=Math.min(3,chart.score);
+
+    let mtfScore=0;
+    if(htfCandles&&htfCandles.length>=30){
+      const hc=htfCandles.map(c=>parseFloat(c.close));
+      const he20=calcEMA(hc,20),he50=calcEMA(hc,50);
+      const hr=calcRSI(hc,14),hm=calcMACD(hc);
+      const isBull=bullVotes.length>bearVotes.length;
+      if(he20&&he50&&((isBull&&he20>he50)||(!isBull&&he20<he50))) mtfScore++;
+      if(hr!==null&&((isBull&&hr>50)||(!isBull&&hr<50))) mtfScore++;
+      if(hm&&((isBull&&hm.bullish)||(!isBull&&!hm.bullish))) mtfScore++;
+    }
+
+    if(adx) vote("ADX",adx.bull&&adx.strong,!adx.bull&&adx.strong,"osc");
+    if(aroon) vote("Aroon",aroon.bull,aroon.bear,"osc");
+    const oscScore=Math.min(3,Math.max(cats.osc?.bull||0,cats.osc?.bear||0));
+
+    totalScore=trendScore+momScore+volScore+volumeScore+smcScore+candleScore+chartScore+mtfScore+oscScore;
+
+    const bullTotal=bullVotes.length,bearTotal=bearVotes.length;
+    const bullPct=Math.round((bullTotal/(bullTotal+bearTotal+0.001))*100);
+    const bearPct=100-bullPct;
+
+    let signal="WAIT",tier="WAIT";
+    if(totalScore>=26) tier="ELITE ULTRA";
+    else if(totalScore>=21) tier="STRONG";
+    else if(totalScore>=16) tier="MODERATE";
+    else if(totalScore>=11) tier="WEAK";
+    if(totalScore>=16) signal=bullPct>bearPct?"RISE":"FALL";
+
+    const entry=latest;
+    const sl=signal==="RISE"?entry-atr*1.5:entry+atr*1.5;
+    const tp1=signal==="RISE"?entry+atr*2:entry-atr*2;
+    const tp2=signal==="RISE"?entry+atr*4:entry-atr*4;
+    const tp3=signal==="RISE"?entry+atr*6:entry-atr*6;
+    const rr1=Math.abs((tp1-entry)/(entry-sl+0.00001)).toFixed(1);
+    const rr2=Math.abs((tp2-entry)/(entry-sl+0.00001)).toFixed(1);
+
+    const predictions=totalScore>=16?predict5Candles(signal,totalScore,atr):[];
+
+    const swingHighs=[],swingLows=[];
+    for(let i=2;i<Math.min(20,highs.length-2);i++){
+      if(highs[i]>highs[i-1]&&highs[i]>highs[i+1]) swingHighs.push({i,price:highs[i]});
+      if(lows[i]<lows[i-1]&&lows[i]<lows[i+1]) swingLows.push({i,price:lows[i]});
+    }
+    const fibHigh=Math.max(...highs.slice(0,20));
+    const fibLow=Math.min(...lows.slice(0,20));
+    const fibRange=fibHigh-fibLow;
+    const fibLevels=[0,0.236,0.382,0.5,0.618,0.786,1].map(r=>({ratio:r,price:fibLow+fibRange*(1-r)}));
+
+    return {
+      symbol,timeframe:tf,signal,tier,totalScore,maxScore:30,
+      bullPct,bearPct,bullVotes:bullTotal,bearVotes:bearTotal,
+      price:latest.toFixed(2),entry:entry.toFixed(2),
+      sl:sl.toFixed(2),tp1:tp1.toFixed(2),tp2:tp2.toFixed(2),tp3:tp3.toFixed(2),
+      rr1,rr2,atr:atr.toFixed(5),session:getSession(),
+      rsi:rsi?.toFixed(1),macd:macd?.bullish,adx:adx?.adx?.toFixed(1),
+      stoch:stoch?.k,cci:cci?.toFixed(0),wr:wr?.toFixed(0),
+      volSpike,bbSqueeze,smc,chart,pattern:pat.name,
+      predictions,fibLevels,swingHighs,swingLows,
+      categories:{trendScore,momScore,volScore,volumeScore,smcScore,candleScore,chartScore,mtfScore,oscScore},
+      indicators:{ema20,ema50,ema200,rsi,macd,stoch,srsi,cci,wr,adx,aroon,obv,mfi,cmf,bb,ichi,psar},
+      timestamp:new Date().toISOString(),
+    };
+  } catch(e) { log("megaAnalysisFromCandles error: "+e.message); return null; }
+}
+
+
+app.post('/mega/analyze', async (req, res) => {
+  const { candles, htfCandles, symbol, tf } = req.body;
+  if (!candles || !Array.isArray(candles) || candles.length < 30) {
+    return res.json({ error: 'Need at least 30 candles' });
+  }
+  log('⚡ MEGA analyze: ' + symbol + ' ' + tf + ' candles:' + candles.length);
+  try {
+    const result = await megaAnalysisFromCandles(symbol, tf, candles, htfCandles||[]);
+    if (!result) return res.json({ error: 'Analysis failed' });
+    res.json(result);
+  } catch(e) {
+    log('MEGA analyze error: ' + e.message);
+    res.json({ error: e.message });
+  }
+});
+
 app.get('/mega/signal/:symbol', async (req,res) => {
   const symbol = decodeURIComponent(req.params.symbol);
   const tf     = req.query.tf || '1min';
