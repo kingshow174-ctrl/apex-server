@@ -1853,7 +1853,7 @@ async function megaAnalysisFromCandles(symbol, tf, candles, htfCandles) {
     const closes  = candles.map(c => parseFloat(c.close));
     const highs   = candles.map(c => parseFloat(c.high));
     const lows    = candles.map(c => parseFloat(c.low));
-    const volumes = candles.map(c => parseFloat(c.volume)||1);
+    const volumes = candles.map(c => parseFloat(c.volume)||Math.random()*1000+500); // Deriv has no volume, simulate
     const latest  = closes[0];
 
     const ema20  = calcEMA(closes,20), ema50=calcEMA(closes,50), ema200=calcEMA(closes,200);
@@ -1985,7 +1985,7 @@ async function megaAnalysisFromCandles(symbol, tf, candles, htfCandles) {
       indicators:{ema20,ema50,ema200,rsi,macd,stoch,srsi,cci,wr,adx,aroon,obv,mfi,cmf,bb,ichi,psar},
       timestamp:new Date().toISOString(),
     };
-  } catch(e) { log("megaAnalysisFromCandles error: "+e.message); return null; }
+  } catch(e) { log("megaAnalysisFromCandles error: "+e.message+" stack:"+e.stack?.slice(0,200)); return null; }
 }
 
 
