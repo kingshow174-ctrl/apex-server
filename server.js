@@ -1690,7 +1690,15 @@ async function megaAnalysis(symbol, tf, htfCandles) {
     const hma    = calcHMA(closes,20);
     const ichi   = calcIchimoku(closes,highs,lows);
     const psar   = calcParabolicSAR(highs,lows);
-    const bb     = calcBB(closes,20,2);
+    // Inline BB since calcBB scope issue
+    const bbCalc = (cls, period=20, mult=2) => {
+      if (cls.length<period) return null;
+      const slice=cls.slice(0,period);
+      const mean=slice.reduce((a,b)=>a+b,0)/period;
+      const std=Math.sqrt(slice.reduce((a,b)=>a+Math.pow(b-mean,2),0)/period);
+      return { upper:mean+mult*std, middle:mean, lower:mean-mult*std };
+    };
+    const bb = bbCalc(closes,20,2);
     const rsi    = calcRSI(closes,14);
     const macd   = calcMACD(closes);
     const stoch  = calcStochastic(highs,lows,closes,14);
@@ -1705,7 +1713,7 @@ async function megaAnalysis(symbol, tf, htfCandles) {
     const smc    = detectSMC(closes,highs,lows);
     const pat    = getPattern(candles);
     const chart  = detectChartPattern(closes,highs,lows);
-    const vwap   = calcBB(closes,20,0); // use middle as proxy VWAP
+    const vwap   = bbCalc(closes,20,0); // use middle as proxy VWAP
 
     let atrSum=0; for(let i=0;i<14;i++) atrSum+=highs[i]-lows[i];
     const atr=atrSum/14;
