@@ -1410,6 +1410,51 @@ app.post("/admin/payout/pay", requireAdmin, async (req, res) => {
   res.json({ success:true });
 });
 
+
+// Track when user registers via referral link
+app.post("/referral/track-signup", async (req, res) => {
+  const { user_id, ref_code } = req.body;
+  if (!user_id || !ref_code) return res.json({ ok: false });
+  try {
+    // Find influencer by code
+    const { data: inf } = await supabase.from("influencers")
+      .select("*").eq("referral_code", ref_code.toUpperCase()).single();
+    if (!inf) return res.json({ ok: false, message: "Invalid code" });
+
+    // Save referred_by on profile
+    await supabase.from("profiles")
+      .update({ referred_by: ref_code.toUpperCase() })
+      .eq("id", user_id);
+
+    // Add to referrals table as registration event
+    const { data: existing } = await supabase.from("referrals")
+      .select("id").eq("referred_user_id", user_id).single();
+
+    if (!existing) {
+      await supabase.from("referrals").insert({
+        influencer_id: inf.id,
+        referred_user_id: user_id,
+        plan: "registered",
+        commission: 0,
+        status: "registered",
+        event: "signup",
+      });
+
+      // Update influencer referral count
+      await supabase.from("influencers").update({
+        total_referrals: (inf.total_referrals || 0) + 1,
+      }).eq("id", inf.id);
+
+      log("✅ Referral signup tracked: " + user_id + " via " + ref_code);
+    }
+
+    res.json({ ok: true });
+  } catch(e) {
+    log("Referral track error: " + e.message);
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 // Validate referral code
 app.get("/referral/check/:code", async (req, res) => {
   try {
