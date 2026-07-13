@@ -1320,11 +1320,27 @@ app.get("/influencer/:userId", async (req, res) => {
     const { data: payouts } = await supabase.from("payouts")
       .select("*").eq("influencer_id", inf.id).order("created_at", { ascending:false });
 
-    const totalEarned = (referrals||[]).reduce((a,r)=>a+(r.commission||0),0);
+    const allReferrals = referrals||[];
+    const totalEarned = allReferrals.reduce((a,r)=>a+(r.commission||0),0);
     const totalPaid = (payouts||[]).filter(p=>p.status==="paid").reduce((a,p)=>a+(p.amount||0),0);
     const balance = totalEarned - totalPaid;
 
-    res.json({ registered:true, influencer:inf, referrals:referrals||[], payouts:payouts||[], totalEarned, totalPaid, balance });
+    // Count all events - signups + subscriptions
+    const signups = allReferrals.filter(r=>r.event==="signup"||r.status==="registered").length;
+    const subscriptions = allReferrals.filter(r=>r.event!=="signup"&&r.status!=="registered"&&r.commission>0).length;
+
+    // Sync total_referrals counter if wrong
+    if (inf.total_referrals !== allReferrals.length) {
+      await supabase.from("influencers")
+        .update({ total_referrals: allReferrals.length, total_earnings: totalEarned })
+        .eq("id", inf.id);
+    }
+
+    res.json({
+      registered:true, influencer:{...inf, total_referrals:allReferrals.length, total_earnings:totalEarned},
+      referrals:allReferrals, payouts:payouts||[], totalEarned, totalPaid, balance,
+      stats:{ signups, subscriptions, total:allReferrals.length }
+    });
   } catch(e) { res.json({ error:e.message }); }
 });
 
