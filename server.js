@@ -1858,12 +1858,25 @@ app.post('/mega/analyze', (req, res) => {
 });
 
 // ============ GEMINI AI TRADING ANALYSIS ============
+
+// Gemini response cache - 60 seconds per pair+tf
+const geminiCache = {};
+
+
 const GEMINI_KEY = process.env.GEMINI_KEY || process.env.GEMINI_KEY;
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
 
 app.post("/ai/analyze", async (req, res) => {
   const { candles, symbol, tf } = req.body;
   if (!candles || candles.length < 10) return res.json({ error: "Need at least 10 candles" });
+
+  // Check cache first
+  const cacheKey = symbol + "_" + tf;
+  const cached = geminiCache[cacheKey];
+  if (cached && Date.now() - cached.time < 60000) {
+    log("🤖 Gemini cache hit: " + symbol + " " + tf);
+    return res.json({ ...cached.data, fromCache: true });
+  }
 
   try {
     log("🤖 Gemini analyzing: " + symbol + " " + tf);
@@ -1969,7 +1982,7 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
 
     log("🤖 Gemini signal: " + aiResult.signal + " " + aiResult.confidence + "% - " + aiResult.reasoning?.slice(0,50));
 
-    res.json({
+    const finalResult = {
       ...aiResult,
       symbol, timeframe: tf,
       price: latest.toFixed(2),
@@ -1978,7 +1991,9 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
       atr: atr.toFixed(4),
       timestamp: new Date().toISOString(),
       engine: "Gemini AI",
-    });
+    };
+    geminiCache[cacheKey] = { data: finalResult, time: Date.now() };
+    res.json(finalResult);
 
   } catch(e) {
     log("Gemini error: " + e.message);
