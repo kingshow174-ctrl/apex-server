@@ -1471,6 +1471,50 @@ app.post("/referral/track-signup", async (req, res) => {
   }
 });
 
+
+// Sync all referral counts - run this to fix broken counts
+app.post("/referral/sync", requireAdmin, async (req, res) => {
+  try {
+    const { data: influencers } = await supabase.from("influencers").select("*");
+    let fixed = 0;
+    for (const inf of influencers||[]) {
+      const { data: refs } = await supabase.from("referrals").select("*").eq("influencer_id", inf.id);
+      const total = (refs||[]).length;
+      const earned = (refs||[]).reduce((a,r)=>a+(r.commission||0),0);
+      if (inf.total_referrals !== total || inf.total_earnings !== earned) {
+        await supabase.from("influencers").update({ total_referrals:total, total_earnings:earned }).eq("id", inf.id);
+        fixed++;
+      }
+    }
+    res.json({ success:true, fixed, total:influencers?.length });
+  } catch(e) { res.json({ error:e.message }); }
+});
+
+// Manual referral add - admin can manually link a user to an influencer
+app.post("/referral/manual-add", requireAdmin, async (req, res) => {
+  const { user_email, ref_code } = req.body;
+  try {
+    const { data: profile } = await supabase.from("profiles").select("*").eq("email", user_email).single();
+    if (!profile) return res.json({ error:"User not found" });
+    const { data: inf } = await supabase.from("influencers").select("*").eq("referral_code", ref_code.toUpperCase()).single();
+    if (!inf) return res.json({ error:"Referral code not found" });
+
+    // Update profile
+    await supabase.from("profiles").update({ referred_by: ref_code.toUpperCase() }).eq("id", profile.id);
+
+    // Add referral record
+    const { data: existing } = await supabase.from("referrals").select("id").eq("referred_user_id", profile.id).single();
+    if (!existing) {
+      await supabase.from("referrals").insert({
+        influencer_id: inf.id, referred_user_id: profile.id,
+        plan:"registered", commission:0, status:"registered", event:"signup"
+      });
+      await supabase.from("influencers").update({ total_referrals:(inf.total_referrals||0)+1 }).eq("id", inf.id);
+    }
+    res.json({ success:true, message:"User linked to "+inf.full_name });
+  } catch(e) { res.json({ error:e.message }); }
+});
+
 // Validate referral code
 app.get("/referral/check/:code", async (req, res) => {
   try {
@@ -1810,5 +1854,124 @@ app.post('/mega/analyze', (req, res) => {
   } catch(e) {
     log('MEGA error: '+e.message);
     res.json({ error: e.message });
+  }
+});
+
+// ============ GEMINI AI TRADING ANALYSIS ============
+const GEMINI_KEY = process.env.GEMINI_KEY || process.env.GEMINI_KEY;
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_KEY;
+
+app.post("/ai/analyze", async (req, res) => {
+  const { candles, symbol, tf } = req.body;
+  if (!candles || candles.length < 10) return res.json({ error: "Need at least 10 candles" });
+
+  try {
+    log("🤖 Gemini analyzing: " + symbol + " " + tf);
+
+    // Prepare candle data for Gemini
+    const recent = candles.slice(0, 30);
+    const candleText = recent.map((c, i) =>
+      `C${i+1}: O=${parseFloat(c.open).toFixed(2)} H=${parseFloat(c.high).toFixed(2)} L=${parseFloat(c.low).toFixed(2)} CL=${parseFloat(c.close).toFixed(2)}`
+    ).join("\n");
+
+    // Price stats
+    const closes = recent.map(c => parseFloat(c.close));
+    const high20 = Math.max(...recent.map(c => parseFloat(c.high)));
+    const low20  = Math.min(...recent.map(c => parseFloat(c.low)));
+    const latest = closes[0];
+    const change = ((closes[0]-closes[1])/closes[1]*100).toFixed(3);
+
+    const prompt = `You are an expert binary options trader analyzing ${symbol} on ${tf} timeframe for Deriv Rise/Fall contracts.
+
+Current Price: ${latest.toFixed(2)}
+Last 20-candle High: ${high20.toFixed(2)}
+Last 20-candle Low: ${low20.toFixed(2)}
+Last candle change: ${change}%
+
+Recent candles (newest first):
+${candleText}
+
+Analyze this price action deeply. Look for:
+1. Trend direction and strength
+2. Support/resistance levels
+3. Momentum and reversal signals
+4. Volume patterns (if visible in price action)
+5. Key candlestick patterns
+6. Best entry timing
+
+Predict the NEXT 5 CANDLES direction with confidence.
+
+Respond ONLY with this exact JSON (no markdown, no extra text):
+{
+  "signal": "RISE or FALL or WAIT",
+  "confidence": 0-100,
+  "tier": "ELITE ULTRA or STRONG or MODERATE or WEAK or WAIT",
+  "reasoning": "Brief explanation of why",
+  "trend": "BULLISH or BEARISH or SIDEWAYS",
+  "key_level": "Important price level to watch",
+  "entry_quality": "EXCELLENT or GOOD or FAIR or POOR",
+  "next5candles": [
+    {"n": 1, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
+    {"n": 2, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
+    {"n": 3, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
+    {"n": 4, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
+    {"n": 5, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"}
+  ],
+  "risk_warning": "Any risk to be aware of",
+  "best_expiry": "Recommended candles to hold e.g. 3 candles",
+  "market_context": "What the market is telling us right now"
+}`;
+
+    const response = await axios.post(GEMINI_URL, {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 1000,
+      }
+    }, { timeout: 30000 });
+
+    const raw = response.data.candidates?.[0]?.content?.parts?.map(p => p.text||"").join("") || "";
+    log("Gemini raw: " + raw.slice(0,200));
+    // Clean and extract JSON robustly
+    let clean = raw.replace(/```json|```/g, "").trim();
+    // Extract JSON object if wrapped in text
+    const jsonMatch = clean.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON in Gemini response: " + clean.slice(0,100));
+    clean = jsonMatch[0];
+    let aiResult;
+    try {
+      aiResult = JSON.parse(clean);
+    } catch(parseErr) {
+      // Try fixing common JSON issues
+      clean = clean
+        .replace(/,\s*}/g, '}')
+        .replace(/,\s*]/g, ']')
+        .replace(/(['"])?([a-zA-Z0-9_]+)(['"])?\s*:/g, '"$2":')
+        .replace(/:\s*'([^']*)'/g, ': "$1"');
+      aiResult = JSON.parse(clean);
+    }
+
+    // Calculate TP/SL from candle data
+    const atr = recent.slice(0,14).reduce((a,c) => a + (parseFloat(c.high)-parseFloat(c.low)), 0) / 14;
+    const sl  = aiResult.signal==="RISE" ? latest-atr*1.5 : latest+atr*1.5;
+    const tp1 = aiResult.signal==="RISE" ? latest+atr*2   : latest-atr*2;
+    const tp2 = aiResult.signal==="RISE" ? latest+atr*4   : latest-atr*4;
+
+    log("🤖 Gemini signal: " + aiResult.signal + " " + aiResult.confidence + "% - " + aiResult.reasoning?.slice(0,50));
+
+    res.json({
+      ...aiResult,
+      symbol, timeframe: tf,
+      price: latest.toFixed(2),
+      entry: latest.toFixed(2),
+      sl: sl.toFixed(2), tp1: tp1.toFixed(2), tp2: tp2.toFixed(2),
+      atr: atr.toFixed(4),
+      timestamp: new Date().toISOString(),
+      engine: "Gemini AI",
+    });
+
+  } catch(e) {
+    log("Gemini error: " + e.message);
+    res.json({ error: "AI analysis failed: " + e.message });
   }
 });
