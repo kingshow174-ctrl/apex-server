@@ -1922,13 +1922,23 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
   "market_context": "What the market is telling us right now"
 }`;
 
-    const response = await axios.post(GEMINI_URL, {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 1000,
+    // Retry up to 3 times on rate limit
+    let response, retries = 0;
+    while (retries < 3) {
+      try {
+        response = await axios.post(GEMINI_URL, {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 1000 }
+        }, { timeout: 30000 });
+        break;
+      } catch(retryErr) {
+        if (retryErr.response?.status === 429 && retries < 2) {
+          retries++;
+          log("Gemini 429 - retry " + retries + " in 5s");
+          await new Promise(r => setTimeout(r, 5000));
+        } else throw retryErr;
       }
-    }, { timeout: 30000 });
+    }
 
     const raw = response.data.candidates?.[0]?.content?.parts?.map(p => p.text||"").join("") || "";
     log("Gemini raw: " + raw.slice(0,200));
