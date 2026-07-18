@@ -1898,45 +1898,56 @@ app.post("/ai/analyze", async (req, res) => {
     const latest = closes[0];
     const change = ((closes[0]-closes[1])/closes[1]*100).toFixed(3);
 
-    const prompt = `You are an expert binary options trader analyzing ${symbol} on ${tf} timeframe for Deriv Rise/Fall contracts.
+    // Calculate momentum indicators to give AI more context
+    const closes50 = closes.slice(0,50);
+    const ema9  = closes50.slice(0,9).reduce((a,b)=>a+b,0)/9;
+    const ema21 = closes50.slice(0,21).reduce((a,b)=>a+b,0)/21;
+    const rsiGain = closes50.slice(0,14).filter((_,i)=>closes50[i]>closes50[i+1]).reduce((a,b)=>a+b,0)/14;
+    const rsiLoss = closes50.slice(0,14).filter((_,i)=>closes50[i]<closes50[i+1]).reduce((a,b)=>a+b,0)/14;
+    const rsi = 100-(100/(1+(rsiGain/(rsiLoss||0.001))));
+    const momentum = ((closes[0]-closes[4])/closes[4]*100).toFixed(3);
+    const volatility = ((high20-low20)/low20*100).toFixed(3);
+    const lastBull = closes.slice(0,5).filter((_,i)=>closes[i]>closes[i+1]).length;
+    const lastBear = 5 - lastBull;
 
-Current Price: ${latest.toFixed(2)}
-Last 20-candle High: ${high20.toFixed(2)}
-Last 20-candle Low: ${low20.toFixed(2)}
-Last candle change: ${change}%
+    const prompt = `You are an expert trader analyzing ${symbol} volatility index on ${tf} timeframe for Deriv Rise/Fall.
 
-Recent candles (newest first):
+PRICE DATA:
+Current: ${latest.toFixed(2)} | High20: ${high20.toFixed(2)} | Low20: ${low20.toFixed(2)}
+Change: ${change}% | Momentum(5c): ${momentum}% | Volatility: ${volatility}%
+EMA9: ${ema9.toFixed(2)} | EMA21: ${ema21.toFixed(2)} | RSI: ${rsi.toFixed(1)}
+Last 5 candles: ${lastBull} bullish, ${lastBear} bearish
+
+RECENT CANDLES (newest first - analyze price action carefully):
 ${candleText}
 
-Analyze this price action deeply. Look for:
-1. Trend direction and strength
-2. Support/resistance levels
-3. Momentum and reversal signals
-4. Volume patterns (if visible in price action)
-5. Key candlestick patterns
-6. Best entry timing
+IMPORTANT INSTRUCTIONS:
+- Be OBJECTIVE. Do not always say RISE. If market shows weakness, say FALL.
+- If trend is unclear or choppy, say WAIT.
+- Base decision on ACTUAL candle data above, not assumptions.
+- Consider: Is price making higher highs? Lower lows? Consolidating?
+- RSI above 60 = overbought (possible FALL). RSI below 40 = oversold (possible RISE).
+- EMA9 vs EMA21: ${ema9>ema21?"EMA9 above EMA21 (bullish)":"EMA9 below EMA21 (bearish)"}
 
-Predict the NEXT 5 CANDLES direction with confidence.
-
-Respond ONLY with this exact JSON (no markdown, no extra text):
+Respond ONLY with valid JSON:
 {
   "signal": "RISE or FALL or WAIT",
-  "confidence": 0-100,
+  "confidence": 50-95,
   "tier": "ELITE ULTRA or STRONG or MODERATE or WEAK or WAIT",
-  "reasoning": "Brief explanation of why",
+  "reasoning": "2 sentences explaining what candles show and why this direction",
   "trend": "BULLISH or BEARISH or SIDEWAYS",
-  "key_level": "Important price level to watch",
+  "key_level": "${latest.toFixed(2)}",
   "entry_quality": "EXCELLENT or GOOD or FAIR or POOR",
   "next5candles": [
-    {"n": 1, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
-    {"n": 2, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
-    {"n": 3, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
-    {"n": 4, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"},
-    {"n": 5, "direction": "UP or DOWN", "confidence": 0-100, "reason": "why"}
+    {"n":1,"direction":"UP or DOWN","confidence":50-95,"reason":"specific reason"},
+    {"n":2,"direction":"UP or DOWN","confidence":45-90,"reason":"specific reason"},
+    {"n":3,"direction":"UP or DOWN","confidence":40-85,"reason":"specific reason"},
+    {"n":4,"direction":"UP or DOWN","confidence":35-80,"reason":"specific reason"},
+    {"n":5,"direction":"UP or DOWN","confidence":30-75,"reason":"specific reason"}
   ],
-  "risk_warning": "Any risk to be aware of",
-  "best_expiry": "Recommended candles to hold e.g. 3 candles",
-  "market_context": "What the market is telling us right now"
+  "risk_warning": "Specific risk for this trade",
+  "best_expiry": "2-4 candles",
+  "market_context": "What the overall market structure shows"
 }`;
 
     const response = await axios.post(GROQ_URL, {
