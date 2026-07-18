@@ -2006,7 +2006,7 @@ Respond ONLY with valid JSON (no markdown):
   "trend": "BULLISH or BEARISH or SIDEWAYS",
   "key_level": "Most important price level right now",
   "entry_quality": "EXCELLENT or GOOD or FAIR or POOR",
-  "streak_warning": "${streak} consecutive ${streakDir} candles - ${streak>=4?"HIGH reversal risk":"moderate risk"}",
+  "streak_warning": "Check streak and reversal risk",
   "next5candles": [
     {"n":1,"direction":"UP or DOWN","confidence":45-90,"reason":"based on current candle structure"},
     {"n":2,"direction":"UP or DOWN","confidence":40-85,"reason":"continuation or reversal"},
@@ -2014,7 +2014,7 @@ Respond ONLY with valid JSON (no markdown):
     {"n":4,"direction":"UP or DOWN","confidence":30-75,"reason":"momentum"},
     {"n":5,"direction":"UP or DOWN","confidence":25-70,"reason":"longer term view"}
   ],
-  "risk_warning": "Specific risk: mention the ${streak}-candle streak and RSI level",
+  "risk_warning": "Consider streak exhaustion and current RSI level",
   "best_expiry": "1-3 candles recommended",
   "market_context": "Full context: streak exhaustion, RSI, candle patterns and what they mean together"
 }`;
