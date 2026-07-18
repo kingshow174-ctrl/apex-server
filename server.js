@@ -1866,6 +1866,9 @@ const geminiCache = {};
 const GEMINI_KEY = process.env.GEMINI_KEY || process.env.GEMINI_KEY;
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
 
+const GROQ_KEY = process.env.GROQ_KEY || "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";
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+
 app.post("/ai/analyze", async (req, res) => {
   const { candles, symbol, tf } = req.body;
   if (!candles || candles.length < 10) return res.json({ error: "Need at least 10 candles" });
