@@ -1989,3 +1989,106 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
     res.json({ error: "AI analysis failed: " + e.message });
   }
 });
+
+// ============ OLYMP SIGNALS - GROQ AI ============
+app.post("/po/ai/signal", async (req, res) => {
+  const { symbol, tf } = req.body;
+  if (!symbol || !tf) return res.json({ error: "symbol and tf required" });
+
+  // Cache 3 minutes
+  const cacheKey = "po_" + symbol + "_" + tf;
+  const cached = aiCache[cacheKey];
+  if (cached && Date.now() - cached.time < 180000) {
+    log("🤖 PO cache hit: " + symbol);
+    return res.json({ ...cached.data, fromCache: true });
+  }
+
+  try {
+    log("🤖 PO AI: " + symbol + " " + tf);
+    const candles = await fetchCandles(symbol, tf);
+    if (!candles || candles.length < 10) return res.json({ error: "No market data for " + symbol });
+
+    const closes = candles.map(c => parseFloat(c.close));
+    const highs  = candles.map(c => parseFloat(c.high));
+    const lows   = candles.map(c => parseFloat(c.low));
+    const latest = closes[0];
+    const high20 = Math.max(...highs.slice(0,20));
+    const low20  = Math.min(...lows.slice(0,20));
+    const change = ((closes[0]-closes[1])/closes[1]*100).toFixed(3);
+    const atr    = highs.slice(0,14).reduce((a,_,i)=>a+highs[i]-lows[i],0)/14;
+
+    const candleText = candles.slice(0,20).map((c,i) =>
+      `C${i+1}: O=${parseFloat(c.open).toFixed(5)} H=${parseFloat(c.high).toFixed(5)} L=${parseFloat(c.low).toFixed(5)} CL=${parseFloat(c.close).toFixed(5)}`
+    ).join("\n");
+
+    const prompt = `You are an expert forex trader analyzing ${symbol} on ${tf} timeframe for OlympTrade.
+
+Current Price: ${latest.toFixed(5)}
+20-candle High: ${high20.toFixed(5)}, Low: ${low20.toFixed(5)}
+Last candle change: ${change}%
+
+Recent candles (newest first):
+${candleText}
+
+Analyze this price action. Look for trend, momentum, support/resistance, patterns, key levels.
+Decide if this is a BUY, SELL or WAIT signal.
+
+Respond ONLY with this exact JSON (no markdown):
+{
+  "signal": "BUY or SELL or WAIT",
+  "confidence": 0-100,
+  "tier": "ELITE ULTRA or STRONG or MODERATE or WEAK or WAIT",
+  "reasoning": "Your analysis in 1-2 sentences",
+  "trend": "BULLISH or BEARISH or SIDEWAYS",
+  "key_level": "${latest.toFixed(5)}",
+  "entry_quality": "EXCELLENT or GOOD or FAIR or POOR",
+  "next3candles": [
+    {"n":1,"direction":"UP or DOWN","confidence":0-100,"reason":"brief reason"},
+    {"n":2,"direction":"UP or DOWN","confidence":0-100,"reason":"brief reason"},
+    {"n":3,"direction":"UP or DOWN","confidence":0-100,"reason":"brief reason"}
+  ],
+  "risk_warning": "One risk to watch",
+  "market_context": "Overall market context"
+}`;
+
+    const response = await axios.post(GROQ_URL, {
+      model: "llama-3.1-8b-instant",
+      messages: [
+        { role:"system", content:"You are an expert forex trader. Always respond with valid JSON only." },
+        { role:"user", content:prompt }
+      ],
+      max_tokens: 800,
+      temperature: 0.1,
+    }, { headers:{ Authorization:"Bearer "+GROQ_KEY }, timeout:30000 });
+
+    const raw = response.data.choices?.[0]?.message?.content || "";
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON in response");
+    const aiResult = JSON.parse(jsonMatch[0]);
+
+    const sl  = aiResult.signal==="BUY" ? latest-atr*1.5 : latest+atr*1.5;
+    const tp1 = aiResult.signal==="BUY" ? latest+atr*2   : latest-atr*2;
+    const tp2 = aiResult.signal==="BUY" ? latest+atr*4   : latest-atr*4;
+
+    const finalResult = {
+      ...aiResult,
+      symbol, timeframe:tf,
+      price: latest.toFixed(5),
+      entry: latest.toFixed(5),
+      sl: sl.toFixed(5), tp1: tp1.toFixed(5), tp2: tp2.toFixed(5),
+      bullPct: aiResult.signal==="BUY"?aiResult.confidence:100-aiResult.confidence,
+      bearPct: aiResult.signal==="SELL"?aiResult.confidence:100-aiResult.confidence,
+      session: getSession(),
+      engine: "Groq AI",
+      timestamp: new Date().toISOString(),
+    };
+
+    aiCache[cacheKey] = { data:finalResult, time:Date.now() };
+    log("🤖 PO signal: "+symbol+" "+aiResult.signal+" "+aiResult.confidence+"%");
+    res.json(finalResult);
+
+  } catch(e) {
+    log("PO AI error: "+e.message);
+    res.json({ error:"AI analysis failed: "+e.message });
+  }
+});
