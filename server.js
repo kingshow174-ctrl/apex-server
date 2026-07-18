@@ -1910,44 +1910,113 @@ app.post("/ai/analyze", async (req, res) => {
     const lastBull = closes.slice(0,5).filter((_,i)=>closes[i]>closes[i+1]).length;
     const lastBear = 5 - lastBull;
 
-    const prompt = `You are an expert trader analyzing ${symbol} volatility index on ${tf} timeframe for Deriv Rise/Fall.
+    // Extended analysis for AI
+    const bodies = recent.map(c => Math.abs(parseFloat(c.close)-parseFloat(c.open)));
+    const avgBody = bodies.slice(0,10).reduce((a,b)=>a+b,0)/10;
+    const lastBody = bodies[0];
+    const bodyRatio = (lastBody/avgBody).toFixed(2);
 
-PRICE DATA:
-Current: ${latest.toFixed(2)} | High20: ${high20.toFixed(2)} | Low20: ${low20.toFixed(2)}
-Change: ${change}% | Momentum(5c): ${momentum}% | Volatility: ${volatility}%
-EMA9: ${ema9.toFixed(2)} | EMA21: ${ema21.toFixed(2)} | RSI: ${rsi.toFixed(1)}
-Last 5 candles: ${lastBull} bullish, ${lastBear} bearish
+    // Detect consecutive candles in same direction
+    let streak = 1;
+    for (let i=1; i<10; i++) {
+      const prev = parseFloat(recent[i].close) > parseFloat(recent[i].open);
+      const curr = parseFloat(recent[i-1].close) > parseFloat(recent[i-1].open);
+      if (prev === curr) streak++; else break;
+    }
+    const streakDir = parseFloat(recent[0].close) > parseFloat(recent[0].open) ? "BULLISH" : "BEARISH";
 
-RECENT CANDLES (newest first - analyze price action carefully):
+    // Detect if price extended from mean
+    const mean20 = closes.slice(0,20).reduce((a,b)=>a+b,0)/20;
+    const deviation = ((latest-mean20)/mean20*100).toFixed(3);
+    const extended = Math.abs(parseFloat(deviation)) > 0.3;
+
+    // Detect reversal candles
+    const lastOpen = parseFloat(recent[0].open);
+    const lastClose = parseFloat(recent[0].close);
+    const lastHigh = parseFloat(recent[0].high);
+    const lastLow = parseFloat(recent[0].low);
+    const lastRange = lastHigh - lastLow;
+    const upperWick = (lastHigh - Math.max(lastOpen,lastClose)) / (lastRange||0.001);
+    const lowerWick = (Math.min(lastOpen,lastClose) - lastLow) / (lastRange||0.001);
+    const isHammer = lowerWick > 0.6 && upperWick < 0.2;
+    const isShootingStar = upperWick > 0.6 && lowerWick < 0.2;
+    const isBullEngulf = lastClose > lastOpen && lastClose > parseFloat(recent[1].open) && lastOpen < parseFloat(recent[1].close);
+    const isBearEngulf = lastClose < lastOpen && lastClose < parseFloat(recent[1].open) && lastOpen > parseFloat(recent[1].close);
+
+    const prompt = `You are a professional price action trader. Think step by step like an experienced trader before deciding.
+
+=== MARKET DATA: ${symbol} | ${tf} ===
+Price: ${latest.toFixed(2)} | Mean(20): ${mean20.toFixed(2)} | Deviation from mean: ${deviation}%
+RSI(14): ${rsi.toFixed(1)} | EMA9: ${ema9.toFixed(2)} | EMA21: ${ema21.toFixed(2)}
+5-candle momentum: ${momentum}% | Volatility: ${volatility}%
+Current streak: ${streak} consecutive ${streakDir} candles
+Last candle body vs average: ${bodyRatio}x (${lastBody>avgBody*1.5?"STRONG candle":"normal candle"})
+Price extended from mean: ${extended?"YES - "+deviation+"%":"NO"}
+Upper wick ratio: ${(upperWick*100).toFixed(0)}% | Lower wick ratio: ${(lowerWick*100).toFixed(0)}%
+Hammer: ${isHammer?"YES":"NO"} | Shooting Star: ${isShootingStar?"YES":"NO"} | Bull Engulf: ${isBullEngulf?"YES":"NO"} | Bear Engulf: ${isBearEngulf?"YES":"NO"}
+
+=== RECENT CANDLES (newest first) ===
 ${candleText}
 
-IMPORTANT INSTRUCTIONS:
-- Be OBJECTIVE. Do not always say RISE. If market shows weakness, say FALL.
-- If trend is unclear or choppy, say WAIT.
-- Base decision on ACTUAL candle data above, not assumptions.
-- Consider: Is price making higher highs? Lower lows? Consolidating?
-- RSI above 60 = overbought (possible FALL). RSI below 40 = oversold (possible RISE).
-- EMA9 vs EMA21: ${ema9>ema21?"EMA9 above EMA21 (bullish)":"EMA9 below EMA21 (bearish)"}
+=== TRADER THINKING RULES ===
+Think like this BEFORE deciding:
 
-Respond ONLY with valid JSON:
+STEP 1 - WHERE IS PRICE?
+- If price is FAR above mean (deviation > +0.3%) = OVERBOUGHT = look for FALL or WAIT
+- If price is FAR below mean (deviation < -0.3%) = OVERSOLD = look for RISE or WAIT  
+- If price is near mean = NEUTRAL = wait for direction
+
+STEP 2 - WHAT IS MOMENTUM DOING?
+- If ${streak} consecutive same-direction candles = trend EXHAUSTING = confidence REDUCES
+- More than 4 same candles in a row = likely reversal coming = WAIT or opposite signal
+- 1-2 candles reversing after long streak = fresh signal = HIGH confidence
+- Choppy alternating candles = NO SIGNAL = WAIT
+
+STEP 3 - WHAT DO CANDLES SHOW?
+- Hammer after downtrend = RISE signal = high confidence
+- Shooting star after uptrend = FALL signal = high confidence  
+- Engulfing candle = strong reversal = high confidence
+- Long wicks = rejection = price will reverse
+- Small doji candles = indecision = WAIT
+- Large body in direction = continuation possible
+
+STEP 4 - RSI CONFIRMATION
+- RSI > 70 = overbought = FALL more likely, reduce RISE confidence
+- RSI < 30 = oversold = RISE more likely, reduce FALL confidence
+- RSI 45-55 = neutral zone = need other confirmation
+
+STEP 5 - CONFIDENCE CALCULATION
+- After long streak (${streak} candles same dir): REDUCE confidence by ${Math.min(streak*8,40)}%
+- Reversal pattern detected: ADD confidence
+- Price at extreme: REDUCE confidence for continuation, ADD for reversal
+- Everything aligns (RSI + candles + reversal): HIGH confidence 80-90%
+- Mixed signals: LOW confidence 50-60% or WAIT
+
+=== YOUR DECISION ===
+Based on the above analysis, what is the smart trade right now?
+Remember: The BEST trades happen at REVERSALS not after long trends.
+A ${streak}-candle ${streakDir} streak means continuation has LOWER probability.
+
+Respond ONLY with valid JSON (no markdown):
 {
   "signal": "RISE or FALL or WAIT",
-  "confidence": 50-95,
+  "confidence": 45-92,
   "tier": "ELITE ULTRA or STRONG or MODERATE or WEAK or WAIT",
-  "reasoning": "2 sentences explaining what candles show and why this direction",
+  "reasoning": "Step by step: 1) Where is price? 2) What does streak mean? 3) What do candles show? 4) Final decision",
   "trend": "BULLISH or BEARISH or SIDEWAYS",
-  "key_level": "${latest.toFixed(2)}",
+  "key_level": "Most important price level right now",
   "entry_quality": "EXCELLENT or GOOD or FAIR or POOR",
+  "streak_warning": "${streak} consecutive ${streakDir} candles - ${streak>=4?"HIGH reversal risk":"moderate risk"}",
   "next5candles": [
-    {"n":1,"direction":"UP or DOWN","confidence":50-95,"reason":"specific reason"},
-    {"n":2,"direction":"UP or DOWN","confidence":45-90,"reason":"specific reason"},
-    {"n":3,"direction":"UP or DOWN","confidence":40-85,"reason":"specific reason"},
-    {"n":4,"direction":"UP or DOWN","confidence":35-80,"reason":"specific reason"},
-    {"n":5,"direction":"UP or DOWN","confidence":30-75,"reason":"specific reason"}
+    {"n":1,"direction":"UP or DOWN","confidence":45-90,"reason":"based on current candle structure"},
+    {"n":2,"direction":"UP or DOWN","confidence":40-85,"reason":"continuation or reversal"},
+    {"n":3,"direction":"UP or DOWN","confidence":35-80,"reason":"trend strength"},
+    {"n":4,"direction":"UP or DOWN","confidence":30-75,"reason":"momentum"},
+    {"n":5,"direction":"UP or DOWN","confidence":25-70,"reason":"longer term view"}
   ],
-  "risk_warning": "Specific risk for this trade",
-  "best_expiry": "2-4 candles",
-  "market_context": "What the overall market structure shows"
+  "risk_warning": "Specific risk: mention the ${streak}-candle streak and RSI level",
+  "best_expiry": "1-3 candles recommended",
+  "market_context": "Full context: streak exhaustion, RSI, candle patterns and what they mean together"
 }`;
 
     const response = await axios.post(GROQ_URL, {
