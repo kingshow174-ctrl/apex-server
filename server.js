@@ -1867,6 +1867,7 @@ const GEMINI_KEY = process.env.GEMINI_KEY || process.env.GEMINI_KEY;
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_KEY;
 
 const GROQ_KEY = process.env.GROQ_KEY;
+const aiCache = {};
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 app.post("/ai/analyze", async (req, res) => {
