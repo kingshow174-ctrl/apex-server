@@ -1935,42 +1935,27 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
   "market_context": "What the market is telling us right now"
 }`;
 
-    // Retry up to 3 times on rate limit
-    let response, retries = 0;
-    while (retries < 3) {
-      try {
-        response = await axios.post(GEMINI_URL, {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 1000 }
-        }, { timeout: 30000 });
-        break;
-      } catch(retryErr) {
-        if (retryErr.response?.status === 429 && retries < 2) {
-          retries++;
-          log("Gemini 429 - retry " + retries + " in 5s");
-          await new Promise(r => setTimeout(r, 5000));
-        } else throw retryErr;
-      }
-    }
+    const response = await axios.post(GROQ_URL, {
+      model: "llama-3.1-8b-instant",
+      messages: [
+        { role: "system", content: "You are an expert binary options trader. Always respond with valid JSON only, no markdown, no extra text." },
+        { role: "user", content: prompt }
+      ],
+      max_tokens: 1000,
+      temperature: 0.1,
+    }, { headers: { Authorization: "Bearer " + GROQ_KEY }, timeout: 30000 });
 
-    const raw = response.data.candidates?.[0]?.content?.parts?.map(p => p.text||"").join("") || "";
-    log("Gemini raw: " + raw.slice(0,200));
-    // Clean and extract JSON robustly
+    const raw = response.data.choices?.[0]?.message?.content || "";
+    log("🤖 Groq raw: " + raw.slice(0,200));
     let clean = raw.replace(/```json|```/g, "").trim();
-    // Extract JSON object if wrapped in text
     const jsonMatch = clean.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON in Gemini response: " + clean.slice(0,100));
+    if (!jsonMatch) throw new Error("No JSON in response: " + clean.slice(0,100));
     clean = jsonMatch[0];
     let aiResult;
     try {
       aiResult = JSON.parse(clean);
     } catch(parseErr) {
-      // Try fixing common JSON issues
-      clean = clean
-        .replace(/,\s*}/g, '}')
-        .replace(/,\s*]/g, ']')
-        .replace(/(['"])?([a-zA-Z0-9_]+)(['"])?\s*:/g, '"$2":')
-        .replace(/:\s*'([^']*)'/g, ': "$1"');
+      clean = clean.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
       aiResult = JSON.parse(clean);
     }
 
@@ -1980,7 +1965,7 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
     const tp1 = aiResult.signal==="RISE" ? latest+atr*2   : latest-atr*2;
     const tp2 = aiResult.signal==="RISE" ? latest+atr*4   : latest-atr*4;
 
-    log("🤖 Gemini signal: " + aiResult.signal + " " + aiResult.confidence + "% - " + aiResult.reasoning?.slice(0,50));
+    log("🤖 Groq signal: " + aiResult.signal + " " + aiResult.confidence + "% - " + aiResult.reasoning?.slice(0,50));
 
     const finalResult = {
       ...aiResult,
@@ -1992,7 +1977,7 @@ Respond ONLY with this exact JSON (no markdown, no extra text):
       timestamp: new Date().toISOString(),
       engine: "Gemini AI",
     };
-    geminiCache[cacheKey] = { data: finalResult, time: Date.now() };
+    aiCache[cacheKey] = { data: finalResult, time: Date.now() };
     res.json(finalResult);
 
   } catch(e) {
