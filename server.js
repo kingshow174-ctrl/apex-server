@@ -1992,12 +1992,21 @@ STEP 5 - CONFIDENCE CALCULATION
 - Everything aligns (RSI + candles + reversal): HIGH confidence 80-90%
 - Mixed signals: LOW confidence 50-60% or WAIT
 
-=== YOUR DECISION ===
-Based on the above analysis, what is the smart trade right now?
-Remember: The BEST trades happen at REVERSALS not after long trends.
-A ${streak}-candle ${streakDir} streak means continuation has LOWER probability.
+=== MANDATORY CHECKS BEFORE ANSWERING ===
+Answer these first in your head:
+1. Last 5 closes: ${closes.slice(0,5).map(c=>c.toFixed(2)).join(" → ")}
+   Going UP or DOWN?
+2. RSI is ${rsi.toFixed(1)} — above 60 means OVERBOUGHT (lean FALL), below 40 means OVERSOLD (lean RISE)
+3. Streak of ${streak} ${streakDir} candles — after 3+ same direction, reversal probability increases
+4. Price deviation ${deviation}% from mean — extended price tends to revert
+5. Hammer=${isHammer} ShootingStar=${isShootingStar} BullEngulf=${isBullEngulf} BearEngulf=${isBearEngulf}
 
-Respond ONLY with valid JSON (no markdown):
+IF last 5 closes are FALLING → signal should lean FALL not RISE
+IF last 5 closes are RISING for 4+ candles → signal should lean WAIT or FALL (exhaustion)
+IF RSI > 65 → do NOT say RISE with high confidence
+IF RSI < 35 → do NOT say FALL with high confidence
+
+Respond ONLY with valid JSON (no markdown, no text outside JSON):
 {
   "signal": "RISE or FALL or WAIT",
   "confidence": 45-92,
@@ -2020,7 +2029,7 @@ Respond ONLY with valid JSON (no markdown):
 }`;
 
     const response = await axios.post(GROQ_URL, {
-      model: "llama-3.1-8b-instant",
+      model: "llama-3.3-70b-versatile",
       messages: [
         { role: "system", content: "You are an expert binary options trader. Always respond with valid JSON only, no markdown, no extra text." },
         { role: "user", content: prompt }
@@ -2132,7 +2141,7 @@ Respond ONLY with this exact JSON (no markdown):
 }`;
 
     const response = await axios.post(GROQ_URL, {
-      model: "llama-3.1-8b-instant",
+      model: "llama-3.3-70b-versatile",
       messages: [
         { role:"system", content:"You are an expert forex trader. Always respond with valid JSON only." },
         { role:"user", content:prompt }
