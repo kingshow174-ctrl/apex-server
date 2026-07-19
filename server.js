@@ -1870,207 +1870,219 @@ const GROQ_KEY = process.env.GROQ_KEY;
 const aiCache = {};
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
+// ============ PATTERN ENGINE - No AI needed ============
 app.post("/ai/analyze", async (req, res) => {
   const { candles, symbol, tf } = req.body;
   if (!candles || candles.length < 10) return res.json({ error: "Need at least 10 candles" });
 
-  const cacheKey = symbol + "_" + tf;
-  const cached = aiCache[cacheKey];
-  if (cached && Date.now() - cached.time < 30000) {
-    log("🤖 AI cache hit: " + symbol + " " + tf);
-    return res.json({ ...cached.data, fromCache: true });
-  }
-
   try {
-    log("🤖 AI analyzing: " + symbol + " " + tf);
-    const recent = candles.slice(0, 40);
-    const closes = recent.map(c => parseFloat(c.close));
-    const highs  = recent.map(c => parseFloat(c.high));
-    const lows   = recent.map(c => parseFloat(c.low));
-    const opens  = recent.map(c => parseFloat(c.open));
+    log("⚡ Pattern engine: " + symbol + " " + tf);
+    const raw = candles.slice(0, 40);
+    const closes = raw.map(c => parseFloat(c.close));
+    const highs  = raw.map(c => parseFloat(c.high));
+    const lows   = raw.map(c => parseFloat(c.low));
+    const opens  = raw.map(c => parseFloat(c.open));
     const latest = closes[0];
 
-    const atr    = highs.slice(0,14).reduce((a,_,i)=>a+(highs[i]-lows[i]),0)/14;
-    const high20 = Math.max(...highs.slice(0,20));
-    const low20  = Math.min(...lows.slice(0,20));
+    // Core indicators
+    const atr    = highs.slice(0,14).reduce((a,_,i)=>a+(highs[i]-lows[i]),0)/14||0.01;
     const mean20 = closes.slice(0,20).reduce((a,b)=>a+b,0)/20;
-    const deviation = ((latest-mean20)/mean20*100).toFixed(3);
+    const std20  = Math.sqrt(closes.slice(0,20).reduce((a,b)=>a+Math.pow(b-mean20,2),0)/20);
+    const bbUpper= mean20+2*std20, bbLower=mean20-2*std20;
     const ema9   = closes.slice(0,9).reduce((a,b)=>a+b,0)/9;
     const ema21  = closes.slice(0,21).reduce((a,b)=>a+b,0)/21;
-    const ema12  = closes.slice(0,12).reduce((a,b)=>a+b,0)/12;
-    const ema26  = closes.slice(0,26).reduce((a,b)=>a+b,0)/26;
-    const macd   = ema12 - ema26;
+    const ema50  = closes.length>=50 ? closes.slice(0,50).reduce((a,b)=>a+b,0)/50 : ema21;
 
+    // RSI
     let g=0,l=0;
     for(let i=0;i<14;i++){const d=closes[i]-closes[i+1];d>0?g+=d:l+=Math.abs(d);}
     const rsi = 100-(100/(1+(g/14)/((l/14)||0.001)));
 
-    const std20   = Math.sqrt(closes.slice(0,20).reduce((a,b)=>a+Math.pow(b-mean20,2),0)/20);
-    const bbUpper = mean20 + 2*std20;
-    const bbLower = mean20 - 2*std20;
-    const bbPos   = latest > bbUpper ? "ABOVE_UPPER" : latest < bbLower ? "BELOW_LOWER" : "INSIDE";
+    // MACD
+    const ema12=closes.slice(0,12).reduce((a,b)=>a+b,0)/12;
+    const ema26=closes.slice(0,26).reduce((a,b)=>a+b,0)/26;
+    const macd=ema12-ema26;
 
-    let streak = 1;
-    const firstBull = closes[0] > opens[0];
-    for(let i=1;i<20;i++){ if((closes[i]>opens[i])===firstBull)streak++; else break; }
-    const streakDir = firstBull ? "BULLISH" : "BEARISH";
+    // Streak
+    let streak=1;
+    const firstBull=closes[0]>opens[0];
+    for(let i=1;i<20;i++){if((closes[i]>opens[i])===firstBull)streak++;else break;}
+    const streakDir=firstBull?"BULLISH":"BEARISH";
 
-    const trend5  = closes[0]>closes[4]  ? "UP":"DOWN";
-    const trend10 = closes[0]>closes[9]  ? "UP":"DOWN";
-    const trend20 = closes[0]>closes[19] ? "UP":"DOWN";
+    // Trend
+    const trend5  = closes[0]>closes[4]  ?"UP":"DOWN";
+    const trend10 = closes[0]>closes[9]  ?"UP":"DOWN";
+    const trend20 = closes[0]>closes[19] ?"UP":"DOWN";
+    const deviation=((latest-mean20)/mean20*100);
+    const bbPos=latest>bbUpper?"ABOVE_UPPER":latest<bbLower?"BELOW_LOWER":"INSIDE";
 
-    // Detect all candle patterns
-    const patterns = [];
-    for(let i=0;i<5;i++){
-      const o=opens[i],h=highs[i],l2=lows[i],c=closes[i];
-      const body=Math.abs(c-o), range=h-l2||0.001;
-      const upperWick=(h-Math.max(c,o))/range;
-      const lowerWick=(Math.min(c,o)-l2)/range;
-      const bodyRatio=body/range;
-      const isBull=c>o;
-      const pos=i===0?"(current)":i===1?"(prev)":"("+i+"ago)";
+    // ── DETECT ALL PATTERNS ──
+    const bullPatterns=[], bearPatterns=[], neutralPatterns=[];
 
-      if(bodyRatio<0.1) patterns.push("DOJI "+pos+" - indecision");
-      if(lowerWick>0.6&&upperWick<0.2&&isBull)  patterns.push("HAMMER "+pos+" - BULLISH REVERSAL");
-      if(upperWick>0.6&&lowerWick<0.2&&!isBull) patterns.push("SHOOTING STAR "+pos+" - BEARISH REVERSAL");
-      if(upperWick>0.6&&lowerWick<0.2&&isBull)  patterns.push("INVERTED HAMMER "+pos);
-      if(lowerWick>0.6&&upperWick<0.2&&!isBull) patterns.push("DRAGONFLY DOJI "+pos+" - BULLISH");
-      if(bodyRatio>0.85&&upperWick<0.05&&lowerWick<0.05&&isBull)  patterns.push("BULL MARUBOZU "+pos+" - STRONG RISE");
-      if(bodyRatio>0.85&&upperWick<0.05&&lowerWick<0.05&&!isBull) patterns.push("BEAR MARUBOZU "+pos+" - STRONG FALL");
-      if(upperWick>0.35&&lowerWick>0.35&&bodyRatio<0.2) patterns.push("SPINNING TOP "+pos+" - indecision");
+    for(let i=0;i<6;i++){
+      if(i>=raw.length) break;
+      const o=opens[i],h=highs[i],lo=lows[i],c=closes[i];
+      const body=Math.abs(c-o), range=h-lo||0.001;
+      const uw=(h-Math.max(c,o))/range;
+      const lw=(Math.min(c,o)-lo)/range;
+      const br=body/range;
+      const bull=c>o;
+      const pos=i===0?"(NOW)":i===1?"(PREV)":"(-"+i+")";
 
-      if(i<4){
-        const po=opens[i+1],ph=highs[i+1],pl=lows[i+1],pc=closes[i+1];
+      // Single candle
+      if(br<0.1){ neutralPatterns.push("DOJI "+pos); }
+      if(lw>0.6&&uw<0.2&&bull)  { bullPatterns.push("HAMMER "+pos); }
+      if(lw>0.6&&uw<0.2&&!bull) { bullPatterns.push("DRAGONFLY DOJI "+pos); }
+      if(uw>0.6&&lw<0.2&&!bull) { bearPatterns.push("SHOOTING STAR "+pos); }
+      if(uw>0.6&&lw<0.2&&bull)  { neutralPatterns.push("INVERTED HAMMER "+pos); }
+      if(br>0.85&&uw<0.05&&lw<0.05&&bull)  { bullPatterns.push("BULL MARUBOZU "+pos); }
+      if(br>0.85&&uw<0.05&&lw<0.05&&!bull) { bearPatterns.push("BEAR MARUBOZU "+pos); }
+      if(uw>0.35&&lw>0.35&&br<0.2) { neutralPatterns.push("SPINNING TOP "+pos); }
+
+      // Two candle patterns
+      if(i<raw.length-1){
+        const po=opens[i+1],pc=closes[i+1],ph=highs[i+1],pl=lows[i+1];
         const prevBull=pc>po;
-        if(isBull&&!prevBull&&c>po&&o<pc)  patterns.push("BULLISH ENGULFING C"+(i+1)+"-C"+(i+2)+" - STRONG RISE");
-        if(!isBull&&prevBull&&c<po&&o>pc)  patterns.push("BEARISH ENGULFING C"+(i+1)+"-C"+(i+2)+" - STRONG FALL");
-        if(Math.abs(h-ph)<atr*0.15&&!isBull&&!prevBull) patterns.push("TWEEZER TOP C"+(i+1)+"-C"+(i+2)+" - BEARISH");
-        if(Math.abs(l2-pl)<atr*0.15&&isBull&&prevBull)  patterns.push("TWEEZER BOTTOM C"+(i+1)+"-C"+(i+2)+" - BULLISH");
-        if(isBull&&!prevBull&&o<pl&&c>((po+pc)/2))  patterns.push("PIERCING LINE - BULLISH");
-        if(!isBull&&prevBull&&o>ph&&c<((po+pc)/2))  patterns.push("DARK CLOUD COVER - BEARISH");
+        if(bull&&!prevBull&&c>po&&o<pc)   bullPatterns.push("BULLISH ENGULFING");
+        if(!bull&&prevBull&&c<po&&o>pc)   bearPatterns.push("BEARISH ENGULFING");
+        if(Math.abs(h-ph)<atr*0.15&&!bull&&!prevBull) bearPatterns.push("TWEEZER TOP");
+        if(Math.abs(lo-pl)<atr*0.15&&bull&&prevBull)  bullPatterns.push("TWEEZER BOTTOM");
+        if(bull&&!prevBull&&o<pl&&c>((po+pc)/2))  bullPatterns.push("PIERCING LINE");
+        if(!bull&&prevBull&&o>ph&&c<((po+pc)/2))  bearPatterns.push("DARK CLOUD COVER");
+        if(bull&&!prevBull&&o>pc&&c<po)  bullPatterns.push("BULLISH HARAMI");
+        if(!bull&&prevBull&&o<pc&&c>po)  bearPatterns.push("BEARISH HARAMI");
       }
 
-      if(i<3){
+      // Three candle patterns
+      if(i<raw.length-2){
         const p1o=opens[i+1],p1c=closes[i+1];
         const p2o=opens[i+2],p2c=closes[i+2];
-        if(isBull&&Math.abs(p1c-p1o)<atr*0.3&&p2c<p2o&&c>((p2o+p2c)/2)) patterns.push("MORNING STAR - STRONG BULLISH REVERSAL");
-        if(!isBull&&Math.abs(p1c-p1o)<atr*0.3&&p2c>p2o&&c<((p2o+p2c)/2)) patterns.push("EVENING STAR - STRONG BEARISH REVERSAL");
-        if(isBull&&p1c>p1o&&p2c>p2o&&c>p1c&&p1c>p2c)  patterns.push("THREE WHITE SOLDIERS - STRONG BULLISH");
-        if(!isBull&&p1c<p1o&&p2c<p2o&&c<p1c&&p1c<p2c) patterns.push("THREE BLACK CROWS - STRONG BEARISH");
-        if(h<highs[i+1]&&l2>lows[i+1]) patterns.push("INSIDE BAR - BREAKOUT PENDING");
+        if(bull&&Math.abs(p1c-p1o)<atr*0.3&&p2c<p2o&&c>((p2o+p2c)/2)) bullPatterns.push("MORNING STAR");
+        if(!bull&&Math.abs(p1c-p1o)<atr*0.3&&p2c>p2o&&c<((p2o+p2c)/2)) bearPatterns.push("EVENING STAR");
+        if(bull&&p1c>p1o&&p2c>p2o&&c>p1c&&p1c>p2c) bullPatterns.push("THREE WHITE SOLDIERS");
+        if(!bull&&p1c<p1o&&p2c<p2o&&c<p1c&&p1c<p2c) bearPatterns.push("THREE BLACK CROWS");
+        if(h<highs[i+1]&&lo>lows[i+1]) neutralPatterns.push("INSIDE BAR");
       }
     }
 
-    const patternText = patterns.length>0 ? patterns.join("\n") : "No clear pattern detected";
-    const candleText  = recent.slice(0,20).map((c,i)=>
-      `C${i+1}: O=${parseFloat(c.open).toFixed(2)} H=${parseFloat(c.high).toFixed(2)} L=${parseFloat(c.low).toFixed(2)} CL=${parseFloat(c.close).toFixed(2)} ${parseFloat(c.close)>parseFloat(c.open)?"GREEN":"RED"}`
-    ).join("\n");
+    // ── SCORING SYSTEM ──
+    let bullScore=0, bearScore=0;
 
-    const candleDurationMin = tf==="1M"?1:tf==="5M"?5:tf==="15M"?15:tf==="30M"?30:60;
-    const minExpiry = candleDurationMin*2;
-    const maxExpiry = candleDurationMin*5;
-    const bestExpiry = Math.round(maxExpiry/candleDurationMin/2)+1;
+    // Pattern scores
+    const strongBull=["BULLISH ENGULFING","MORNING STAR","THREE WHITE SOLDIERS","HAMMER (NOW)","DRAGONFLY DOJI (NOW)","PIERCING LINE","TWEEZER BOTTOM"];
+    const strongBear=["BEARISH ENGULFING","EVENING STAR","THREE BLACK CROWS","SHOOTING STAR (NOW)","DARK CLOUD COVER","TWEEZER TOP"];
+    bullPatterns.forEach(p=>{ bullScore+=strongBull.some(s=>p.includes(s.split(" (")[0]))?3:1; });
+    bearPatterns.forEach(p=>{ bearScore+=strongBear.some(s=>p.includes(s.split(" (")[0]))?3:1; });
 
-    const prompt = `You are a professional binary options trader with 10 years experience analyzing ${symbol} on ${tf}.
+    // RSI score
+    if(rsi<30) bullScore+=3;
+    else if(rsi<40) bullScore+=1;
+    else if(rsi>70) bearScore+=3;
+    else if(rsi>60) bearScore+=1;
 
-INDICATORS:
-RSI(14): ${rsi.toFixed(1)} ${rsi>70?"OVERBOUGHT - lean FALL":rsi<30?"OVERSOLD - lean RISE":rsi>60?"slightly overbought":rsi<40?"slightly oversold":"neutral"}
-EMA9: ${ema9.toFixed(2)} vs EMA21: ${ema21.toFixed(2)} - ${ema9>ema21?"EMA9 ABOVE (bullish)":"EMA9 BELOW (bearish)"}
-MACD: ${macd.toFixed(4)} - ${macd>0?"BULLISH":"BEARISH"}
-Bollinger: ${bbPos} ${bbPos==="ABOVE_UPPER"?"OVERBOUGHT expect pullback":bbPos==="BELOW_LOWER"?"OVERSOLD expect bounce":""}
-Deviation from mean: ${deviation}% ${Math.abs(parseFloat(deviation))>0.5?"EXTENDED - reversal likely":""}
+    // Bollinger score
+    if(bbPos==="BELOW_LOWER") bullScore+=2;
+    else if(bbPos==="ABOVE_UPPER") bearScore+=2;
 
-TREND:
-5-candle: ${trend5} | 10-candle: ${trend10} | 20-candle: ${trend20}
-Current streak: ${streak} consecutive ${streakDir} candles ${streak>=4?"WARNING: EXHAUSTION LIKELY":""}
+    // EMA score
+    if(ema9>ema21) bullScore+=1; else bearScore+=1;
+    if(latest>ema50) bullScore+=1; else bearScore+=1;
 
-DETECTED CANDLE PATTERNS:
-${patternText}
+    // MACD score
+    if(macd>0) bullScore+=1; else bearScore+=1;
 
-RECENT CANDLES:
-${candleText}
+    // Trend score
+    if(trend5==="UP") bullScore+=1; else bearScore+=1;
+    if(trend10==="UP") bullScore+=1; else bearScore+=1;
 
-STRICT TRADING RULES YOU MUST FOLLOW:
-1. RSI>70 = CANNOT give RISE signal with confidence>65
-2. RSI<30 = CANNOT give FALL signal with confidence>65
-3. ${streak}+ same candles streak = reduce continuation confidence by ${Math.min(streak*10,50)}%
-4. Reversal pattern (Hammer/Engulf/Star) at RSI extreme = HIGH confidence opposite direction
-5. Price ABOVE Bollinger upper = lean FALL not RISE
-6. Price BELOW Bollinger lower = lean RISE not FALL
-7. Mixed signals (trend up but RSI overbought) = WAIT or low confidence
-8. ELITE ULTRA only when: reversal pattern + RSI extreme + streak exhaustion ALL confirm
-9. STRONG: 2 of 3 conditions agree
-10. WAIT: no pattern + neutral indicators + conflicting trends
+    // Streak exhaustion - reduce continuation score
+    if(streak>=4){
+      if(streakDir==="BULLISH") { bullScore=Math.max(0,bullScore-streak); bearScore+=2; }
+      else { bearScore=Math.max(0,bearScore-streak); bullScore+=2; }
+    }
 
-EXPIRY FOR ${tf}: min=${minExpiry}min max=${maxExpiry}min best=${bestExpiry} candles
+    // Extension from mean - reversal bias
+    if(deviation>0.5) bearScore+=2;
+    else if(deviation<-0.5) bullScore+=2;
 
-Respond ONLY with valid JSON no markdown:
-{
-  "signal": "RISE or FALL or WAIT",
-  "confidence": 45-92,
-  "tier": "ELITE ULTRA or STRONG or MODERATE or WEAK or WAIT",
-  "reasoning": "1)Patterns found 2)RSI+BB situation 3)Streak analysis 4)Final decision",
-  "trend": "BULLISH or BEARISH or SIDEWAYS",
-  "key_level": "${latest.toFixed(2)}",
-  "entry_quality": "EXCELLENT or GOOD or FAIR or POOR",
-  "next5candles": [
-    {"n":1,"direction":"UP or DOWN","confidence":45-90,"reason":"pattern/momentum"},
-    {"n":2,"direction":"UP or DOWN","confidence":40-85,"reason":"continuation"},
-    {"n":3,"direction":"UP or DOWN","confidence":35-80,"reason":"trend"},
-    {"n":4,"direction":"UP or DOWN","confidence":30-75,"reason":"structure"},
-    {"n":5,"direction":"UP or DOWN","confidence":25-70,"reason":"view"}
-  ],
-  "risk_warning": "Main risk for this specific trade",
-  "min_expiry_min": ${minExpiry},
-  "max_expiry_min": ${maxExpiry},
-  "best_expiry_candles": ${bestExpiry},
-  "market_context": "Full summary of what market is doing"
-}`;
+    // ── SIGNAL DECISION ──
+    const totalScore=bullScore+bearScore;
+    const bullPct=Math.round((bullScore/Math.max(totalScore,1))*100);
+    const bearPct=100-bullPct;
 
-    const response = await axios.post(GROQ_URL, {
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        { role:"system", content:"You are a professional binary options trader. Follow all rules strictly. Respond with valid JSON only." },
-        { role:"user", content:prompt }
-      ],
-      max_tokens: 1200,
-      temperature: 0.1,
-    }, { headers:{ Authorization:"Bearer "+GROQ_KEY }, timeout:30000 });
+    let signal="WAIT", confidence=50, tier="WAIT";
 
-    const raw = response.data.choices?.[0]?.message?.content||"";
-    log("🤖 Groq: "+raw.slice(0,100));
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON: "+raw.slice(0,100));
-    let aiResult;
-    try { aiResult = JSON.parse(jsonMatch[0]); }
-    catch(e){ aiResult = JSON.parse(jsonMatch[0].replace(/,\s*}/g,"}").replace(/,\s*]/g,"]")); }
+    if(bullScore>bearScore&&bullPct>=65){
+      signal="RISE";
+      confidence=Math.min(92,50+bullPct/2);
+      if(confidence>=85) tier="ELITE ULTRA";
+      else if(confidence>=75) tier="STRONG";
+      else if(confidence>=65) tier="MODERATE";
+      else tier="WEAK";
+    } else if(bearScore>bullScore&&bearPct>=65){
+      signal="FALL";
+      confidence=Math.min(92,50+bearPct/2);
+      if(confidence>=85) tier="ELITE ULTRA";
+      else if(confidence>=75) tier="STRONG";
+      else if(confidence>=65) tier="MODERATE";
+      else tier="WEAK";
+    }
 
-    const sl  = aiResult.signal==="RISE"?latest-atr*1.5:latest+atr*1.5;
-    const tp1 = aiResult.signal==="RISE"?latest+atr*2:latest-atr*2;
-    const tp2 = aiResult.signal==="RISE"?latest+atr*4:latest-atr*4;
+    // Build reasoning from actual findings
+    const allDetected=[...bullPatterns,...bearPatterns,...neutralPatterns];
+    const reasonParts=[];
+    if(bullPatterns.length>0) reasonParts.push("Bullish patterns: "+bullPatterns.join(", "));
+    if(bearPatterns.length>0) reasonParts.push("Bearish patterns: "+bearPatterns.join(", "));
+    if(rsi<30) reasonParts.push("RSI oversold ("+rsi.toFixed(1)+")");
+    else if(rsi>70) reasonParts.push("RSI overbought ("+rsi.toFixed(1)+")");
+    if(streak>=3) reasonParts.push(streak+" consecutive "+streakDir+" candles - exhaustion risk");
+    if(bbPos!=="INSIDE") reasonParts.push("Price "+bbPos+" Bollinger Bands");
+    if(deviation>0.5) reasonParts.push("Price extended +"+deviation.toFixed(2)+"% from mean");
+    if(deviation<-0.5) reasonParts.push("Price extended "+deviation.toFixed(2)+"% from mean");
 
-    const finalResult = {
-      ...aiResult, symbol, timeframe:tf,
-      price:latest.toFixed(2), entry:latest.toFixed(2),
-      sl:sl.toFixed(2), tp1:tp1.toFixed(2), tp2:tp2.toFixed(2),
-      atr:atr.toFixed(4),
-      bullPct:aiResult.signal==="RISE"?aiResult.confidence:100-aiResult.confidence,
-      bearPct:aiResult.signal==="FALL"?aiResult.confidence:100-aiResult.confidence,
-      patterns_detected:patterns,
-      rsi:rsi.toFixed(1), macd:macd.toFixed(4),
+    const reasoning = reasonParts.length>0 ? reasonParts.join(" | ") : "No clear setup - mixed signals";
+
+    // Predictions based on signal
+    const decay=signal==="WAIT"?0.8:0.88;
+    const next5candles=Array.from({length:5},(_,i)=>{
+      const conf=Math.round(confidence*Math.pow(decay,i));
+      const dir=signal==="RISE"?"UP":signal==="FALL"?"DOWN":closes[0]>closes[1]?"UP":"DOWN";
+      return {n:i+1,direction:dir,confidence:conf,reason:i===0?"Pattern signal":i===1?"Continuation":i===2?"Momentum":i===3?"Trend":"Structure"};
+    });
+
+    // TP/SL
+    const sl  = signal==="RISE"?latest-atr*1.5:latest+atr*1.5;
+    const tp1 = signal==="RISE"?latest+atr*2:latest-atr*2;
+    const tp2 = signal==="RISE"?latest+atr*4:latest-atr*4;
+    const candleDurationMin=tf==="1M"?1:tf==="5M"?5:tf==="15M"?15:tf==="30M"?30:60;
+
+    res.json({
+      signal, confidence:Math.round(confidence), tier,
+      reasoning, bullPct, bearPct,
+      bullScore, bearScore,
+      patterns_detected: allDetected,
+      bull_patterns: bullPatterns,
+      bear_patterns: bearPatterns,
+      next5candles,
+      rsi:rsi.toFixed(1), macd:macd.toFixed(5),
       bbPosition:bbPos, streak, streakDir,
       trend5, trend10, trend20,
-      session:getSession(), engine:"Groq llama-3.3-70b",
+      entry:latest.toFixed(2), price:latest.toFixed(2),
+      sl:sl.toFixed(2), tp1:tp1.toFixed(2), tp2:tp2.toFixed(2),
+      atr:atr.toFixed(4),
+      min_expiry_min:candleDurationMin*2,
+      max_expiry_min:candleDurationMin*5,
+      best_expiry_candles:3,
+      risk_warning:streak>=4?"Streak exhaustion — "+streak+" "+streakDir+" candles":bearPct>60&&signal==="RISE"?"Bearish pressure present":bullPct>60&&signal==="FALL"?"Bullish pressure present":"Normal risk",
+      session:getSession(),
+      engine:"Pattern Engine v1 - No AI",
+      session:getSession(),
       timestamp:new Date().toISOString(),
-    };
-
-    aiCache[cacheKey] = { data:finalResult, time:Date.now() };
-    log("🤖 Done: "+symbol+" "+aiResult.signal+" "+aiResult.confidence+"% patterns:"+patterns.length);
-    res.json(finalResult);
+    });
 
   } catch(e) {
-    log("AI error: "+e.message);
-    res.json({ error:"AI analysis failed: "+e.message });
+    log("Pattern engine error: "+e.message);
+    res.json({ error:"Analysis failed: "+e.message });
   }
 });
 
